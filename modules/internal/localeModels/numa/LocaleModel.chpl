@@ -17,7 +17,7 @@ module LocaleModel {
 
   use ChapelLocale;
   use DefaultRectangular;
-  //  use ChapelNumLocales;
+  use ChapelNumLocales;
   use Sys;
 
   extern proc chpl_task_getRequestedSubloc(): int(32);
@@ -49,15 +49,6 @@ module LocaleModel {
   proc chpl__initCopy(initial: chpl_localeID_t): chpl_localeID_t;
 
   extern var chpl_nodeID: chpl_nodeID_t;
-
-////////// ChapelNumLocales.chpl inlined here //////////
-  extern proc chpl_comm_default_num_locales(): int;
-  
-  //
-  // the number of locales on which to run the program
-  //
-  config const numLocales = chpl_comm_default_num_locales();
-////////// end ChapelNumLocales.chpl inlining //////////  
 
   // Runtime interface for manipulating global locale IDs.
   extern
@@ -322,6 +313,46 @@ module LocaleModel {
         return (myLocales[node:int].getChild(subloc:int)):locale;
     }
   }
+
+  //////////////////////////////////////////
+  //
+  // support for memory management
+  //
+
+  // The allocator pragma is used by scalar replacement.
+  pragma "allocator"
+  pragma "no sync demotion"
+  pragma "locale model alloc"
+  proc chpl_here_alloc(size:int, md:int(16)) {
+    pragma "insert line file info"
+      extern proc chpl_mem_alloc(size:int, md:int(16)) : opaque;
+    return chpl_mem_alloc(size, md + chpl_memhook_md_num());
+  }
+
+  pragma "allocator"
+  pragma "no sync demotion"
+  proc chpl_here_calloc(size:int, number:int, md:int(16)) {
+    pragma "insert line file info"
+      extern proc chpl_mem_calloc(number:int, size:int, md:int(16)) : opaque;
+    return chpl_mem_calloc(number, size, md + chpl_memhook_md_num());
+  }
+
+  pragma "allocator"
+  pragma "no sync demotion"
+  proc chpl_here_realloc(ptr:opaque, size:int, md:int(16)) {
+    pragma "insert line file info"
+      extern proc chpl_mem_realloc(ptr:opaque, size:int, md:int(16)) : opaque;
+    return chpl_mem_realloc(ptr, size, md + chpl_memhook_md_num());
+  }
+
+  pragma "no sync demotion"
+  pragma "locale model free"
+  proc chpl_here_free(ptr:opaque) {
+    pragma "insert line file info"
+      extern proc chpl_mem_free(ptr:opaque): void;
+    chpl_mem_free(ptr);
+  }
+
 
   //////////////////////////////////////////
   //

@@ -611,13 +611,15 @@ static void build_type_constructor(AggregateType* ct) {
                                           new_StringSymbol(field->name),
                                           new CallExpr("chpl__initCopy",
                                                        new CallExpr(PRIM_TYPE_INIT, arg))));
-
+          #if 0
+          // Leaving this case in for Tom's work.  He will remove it if it is
+          // unnecessary
           else
             fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
                                           fn->_this,
                                           new_StringSymbol(field->name),
                                           new CallExpr(PRIM_TYPE_INIT, arg)));
-
+          #endif
         } else if (exprType) {
           CallExpr* newInit = new CallExpr(PRIM_TYPE_INIT, exprType->copy());
           CallExpr* newSet  = new CallExpr(PRIM_SET_MEMBER, 
@@ -910,6 +912,10 @@ static void build_constructor(AggregateType* ct) {
     }
 
     if (field->hasFlag(FLAG_TYPE_VARIABLE))
+      // Args with this flag are removed after resolution.
+      // Note that in the default type constructor, this flag is also applied
+      // (along with FLAG_GENERIC) to arguments whose type is unknown, but would
+      // not be pruned in resolution.
       arg->addFlag(FLAG_TYPE_VARIABLE);
 
     if (!exprType && arg->type == dtUnknown)
@@ -984,6 +990,7 @@ static ArgSymbol* create_generic_arg(VarSymbol* field)
   if (field->hasFlag(FLAG_PARAM))
     arg->intent = INTENT_PARAM;
   else
+    // Both type arguments and arguments of unspecified type get this flag.
     arg->addFlag(FLAG_TYPE_VARIABLE);
 
   // Copy the field type if it exists.
@@ -998,7 +1005,11 @@ static ArgSymbol* create_generic_arg(VarSymbol* field)
 
   // Translate an unknown field type into an unspecified arg type.
   if (!exprType && arg->type == dtUnknown)
+  {
+    if (! field->hasFlag(FLAG_TYPE_VARIABLE))
+      arg->addFlag(FLAG_GENERIC);
     arg->type = dtAny;
+  }
 
   return arg;
 }

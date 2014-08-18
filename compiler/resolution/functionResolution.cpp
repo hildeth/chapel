@@ -1016,7 +1016,12 @@ static void ensureEnumTypeResolved(EnumType* etype) {
     // Make sure to resolve all enum types.
     for_enums(def, etype) {
       if (def->init) {
+        Expr* enumTypeExpr =
         resolve_type_expr(def->init);
+
+        Type* enumtype = enumTypeExpr->typeInfo();
+        if (enumtype == dtUnknown)
+          INT_FATAL(def->init, "Unable to resolve enumerator type expression");
 
         // printf("Type of %s.%s is %s\n", etype->symbol->name, def->sym->name,
         // enumtype->symbol->name);
@@ -2738,9 +2743,7 @@ static void handleCaptureArgs(CallExpr* call, FnSymbol* taskFn, CallInfo* info) 
 
 static Expr*
 resolve_type_expr(Expr* expr) {
-
   Expr* result = NULL;
-
   for_exprs_postorder(e, expr) {
     result = preFold(e);
     if (CallExpr* call = toCallExpr(result)) {
@@ -2759,7 +2762,6 @@ resolve_type_expr(Expr* expr) {
     }
     result = postFold(result);
   }
-
   return result;
 }
 
@@ -3043,7 +3045,7 @@ static void resolveNormalCall(CallExpr* call) {
     }
   } else {
     best->fn = defaultWrap(best->fn, &best->alignedFormals, &info);
-    best->fn = orderWrap(best->fn, &best->alignedFormals, &info);
+    reorderActuals(best->fn, &best->alignedFormals, &info);
     best->fn = coercionWrap(best->fn, &info);
     best->fn = promotionWrap(best->fn, &info);
   }
@@ -4295,6 +4297,92 @@ static Type* resolveTypeAlias(SymExpr* se)
   return resolveTypeAlias(tse);
 }
 
+
+static CallExpr* generateConcreteConstructorCall(Type* type)
+{
+  // Assume that tuple types have already been resolved.
+  if (type->symbol->hasFlag(FLAG_TUPLE))
+    return new CallExpr(type->defaultInitializer);
+
+  UnresolvedSymExpr* ctorSym =
+    new UnresolvedSymExpr(type->defaultInitializer->name);
+  CallExpr* call = new CallExpr(ctorSym);
+
+  if (isAggregateType(type))
+  {
+    // Do what the default type constructor does for this type does by default.
+    form_Map(SymbolMapElem, sub, type->substitutions)
+    {
+      Symbol* field = sub->key;
+      SymExpr* typeExpr = new SymExpr(sub->value);
+      Expr* init = typeExpr;
+      if (field->hasFlag(FLAG_GENERIC) && isTypeSymbol(typeExpr->var))
+        // This argument expects a value (not a type expression).
+        init = new CallExpr(PRIM_INIT, // This should be "_defaultOf".
+                            typeExpr);
+      NamedExpr* arg = new NamedExpr(field->name, init);
+      call->insertAtTail(arg);
+    }
+  }
+
+  return call;
+}
+
+
+// Substitution of runtime type values for types bearing that flag
+// depends on the type already having been stored in a variable, so we
+// cannot simply name the type as an actual argument and expect it to
+// be replaced by a runtime type value....
+// This function inserts a type temp for type arguments carrying the
+// HAS_RUNTIME_TYPE flag, so that runtime type handling can perform the rest of
+// the substitution.
+// As an alternative to this workaround, we could make the
+// handling of runtime types more robust...
+static void fixupRuntimeTypeArguments(CallExpr* call)
+{
+  for_actuals(actual, call)
+  {
+    NamedExpr* ne = toNamedExpr(actual);
+    SymExpr* se = toSymExpr(ne->actual);
+    if (TypeSymbol* ts = toTypeSymbol(se->var))
+    {
+      if (ts->hasFlag(FLAG_HAS_RUNTIME_TYPE))
+      {
+        Expr* stmt = call->getStmtExpr();
+        VarSymbol* typeTmp = newTemp(astr("_RTT_tmp_", ne->name), se->var->type);
+        typeTmp->addFlag(FLAG_TYPE_VARIABLE);
+        stmt->insertBefore(new DefExpr(typeTmp));
+        CallExpr* init = new CallExpr(PRIM_INIT, se->copy());
+        stmt->insertBefore(new CallExpr(PRIM_MOVE, new SymExpr(typeTmp), init));
+        se->replace(new SymExpr(typeTmp));
+      }
+    }
+  }
+}
+
+
+// generateConcreteConstructorCall() could have inserted call expressions into
+// the argument list for the call.  These need to be flattened and resolved.
+static void flattenAndResolveArgs(CallExpr* call)
+{
+  for_actuals(actual, call)
+  {
+    NamedExpr* ne = toNamedExpr(actual);
+    if (CallExpr* ce = toCallExpr(ne->actual))
+    {
+      Expr* stmt = call->getStmtExpr();
+      VarSymbol* typeTemp = newTemp(astr("_type_tmp_",  ne->name));
+      stmt->insertBefore(new DefExpr(typeTemp));
+      CallExpr* move = new CallExpr(PRIM_MOVE, new SymExpr(typeTemp),
+                                    ce->copy());
+      stmt->insertBefore(move);
+      resolveCall(move);
+      ce->replace(new SymExpr(typeTemp));
+    }
+  }
+}
+
+
 // Returns NULL if no substitution was made.  Otherwise, returns the expression
 // that replaced the PRIM_INIT (or PRIM_NO_INIT) expression.
 // Here, "replaced" means that the PRIM_INIT (or PRIM_NO_INIT) primitive is no
@@ -4343,7 +4431,21 @@ static Expr* resolvePrimInit(CallExpr* call)
 
     SET_LINENO(call);
 
+#define UserCtorsAndDefaultOfHack 1
     if (type->defaultValue) {
+      // In this case, the design choice I made was to use the default value if
+      // it was available, while the defaultOf implementation chooses to pipe
+      // everything through defaultOf.
+      // If we settle on the latter choice, it should be possible to eliminate
+      // the defaultValue field from the type respresentation, and just use
+      // _defaultOf to supply this in module code.
+#if UserCtorsAndDefaultOfHack
+      CallExpr* defOfCall = new CallExpr("_defaultOf", type->symbol);
+      call->replace(defOfCall);
+      resolveCall(defOfCall);
+      resolveFns(defOfCall->isResolved());
+      result = postFold(defOfCall);
+#else
       // Has a default value, so use it.
       result = new SymExpr(type->defaultValue);
       if (type->defaultValue == gNil) {
@@ -4351,23 +4453,10 @@ static Expr* resolvePrimInit(CallExpr* call)
         result = new CallExpr("_cast", type->symbol, result);
       }
       call->replace(result);
+#endif
       return result;
     } 
     
-    // No default value.
-#if 0
-    // I think we don't need this, as extern type blocks get removed later.
-    if (se->var->hasFlag(FLAG_EXTERN))
-    {
-      INT_ASSERT(false); // Do we get here?
-      makeNoop(call);
-      // This seems to work.  May have to replace with
-      // call->getStmtExpr()->remove();
-      result = call;
-      return result;
-    }
-#endif
-
     if (type->defaultInitializer)
     {
       if (type->symbol->hasFlag(FLAG_ITERATOR_RECORD))
@@ -4375,9 +4464,41 @@ static Expr* resolvePrimInit(CallExpr* call)
         // default constructors.  So give up now!
         return result;
 
-      CallExpr* initCall = new CallExpr(type->defaultInitializer);
+      CallExpr* initCall = generateConcreteConstructorCall(type);
       call->replace(initCall);
+      flattenAndResolveArgs(initCall);
+      fixupRuntimeTypeArguments(initCall);
       resolveCall(initCall);
+
+#if UserCtorsAndDefaultOfHack
+      // Hack alert! This is a really lame way to get user default
+      // constructor calls  and _defaultOf to work together.  The basic idea is
+      // to use _defaultOf if we know that the implementation does not call a
+      // user default constructor and the user default constructor otherwise.
+      // The way that we test this is to go ahead and insert a call to the
+      // default construtor and resolve this.  If it turns out that the bound
+      // function is compiler-generated, then we switch to _defaultOf and
+      // resolve again.
+      // The way to use _defaultOf correctly is to insert a call to it at the
+      // beginning of every constructor (to perform value-initialization as
+      // guaranteed by the spec).  But in order to do this neatly, several
+      // changes must be made in how constructors are implemented.
+      // Primarily, statements that look like assignments to fields need to be
+      // converted to copy-initialization of those fields instead.  Also, it
+      // would probably be very handy to be able to invoke both _defaultOf and
+      // constructors themselves as methods.
+      FnSymbol* ctor = initCall->isResolved();
+      if (ctor->hasFlag(FLAG_COMPILER_GENERATED) ||
+          ctor->hasFlag(FLAG_WAS_COMPILER_GENERATED))
+      {
+        CallExpr* defOfCall = new CallExpr("_defaultOf", type->symbol);
+        initCall->replace(defOfCall);
+        resolveCall(defOfCall);
+        initCall = defOfCall;
+      }
+#endif
+
+      resolveFns(initCall->isResolved());
       result = initCall;
       return result;
     }
@@ -4615,26 +4736,6 @@ preFold(Expr* expr) {
         inits.add(call);
       }
 
-    } else if (call->isPrimitive(PRIM_INIT)) {
-      INT_ASSERT(false); // This is now dead code.
-      SymExpr* se = toSymExpr(call->get(1));
-      INT_ASSERT(se);
-      if (!se->var->hasFlag(FLAG_TYPE_VARIABLE))
-        USR_FATAL(call, "invalid type specification");
-      Type* type = call->get(1)->getValType();
-      
-      if (type->symbol->hasFlag(FLAG_ITERATOR_CLASS)) {
-        result = new CallExpr(PRIM_CAST, type->symbol, gNil);
-        call->replace(result);
-      } else if (type->defaultValue == gNil) {
-        result = new CallExpr("_cast", type->symbol, type->defaultValue);
-        call->replace(result);
-      } else if (type->defaultValue) {
-        result = new SymExpr(type->defaultValue);
-        call->replace(result);
-      } else {
-        inits.add(call);
-      }
     } else if (call->isPrimitive(PRIM_TYPEOF)) {
       Type* type = call->get(1)->getValType();
       if (type->symbol->hasFlag(FLAG_HAS_RUNTIME_TYPE)) {
@@ -5265,6 +5366,7 @@ requiresImplicitDestroy(CallExpr* call) {
         !fn->hasFlag(FLAG_DONOR_FN) &&
         !fn->hasFlag(FLAG_INIT_COPY_FN) &&
         strcmp(fn->name, "=") &&
+        strcmp(fn->name, "_defaultOf") &&
         !fn->hasFlag(FLAG_AUTO_II) &&
         !fn->hasFlag(FLAG_CONSTRUCTOR) &&
         !fn->hasFlag(FLAG_TYPE_CONSTRUCTOR)) {
@@ -6793,9 +6895,8 @@ static void resolveRecordInitializers() {
     Type* type = init->get(1)->typeInfo();
 
     // Don't resolve initializers for runtime types.
-    // I think this should be dead code because runtime type expressions
-    // are all resolved during resolution (and this function is called
-    // after that).
+    // These have to be resolved after runtime types are replaced by values in
+    // insertRuntimeInitTemps().
     if (type->symbol->hasFlag(FLAG_HAS_RUNTIME_TYPE))
       continue;
 
@@ -6842,10 +6943,12 @@ static void resolveRecordInitializers() {
       INT_FATAL(init, "PRIM_INIT should have been replaced already");
 
     SET_LINENO(init);
-    if (type->symbol->hasFlag(FLAG_ITERATOR_RECORD)) {
-      // why??  --sjd
-      init->replace(init->get(1)->remove());
-    } else if (type->symbol->hasFlag(FLAG_DISTRIBUTION)) {
+    if (type->symbol->hasFlag(FLAG_DISTRIBUTION)) {
+      // This initialization cannot be replaced by a _defaultOf function
+      // earlier in the compiler, there is not enough information to build a
+      // default function for it.  When we have the ability to call a
+      // constructor from a type alias, it can be moved directly into module
+      // code
       Symbol* tmp = newTemp("_distribution_tmp_");
       init->getStmtExpr()->insertBefore(new DefExpr(tmp));
       CallExpr* classCall = new CallExpr(type->getField("_valueType")->type->defaultInitializer);
@@ -6858,14 +6961,12 @@ static void resolveRecordInitializers() {
       init->replace(distCall);
       resolveCall(distCall);
       resolveFns(distCall->isResolved());
-    } else if (type->symbol->hasFlag(FLAG_EXTERN)) {
-//          init->replace(init->get(1)->remove());
-      init->parentExpr->remove();
     } else {
-      INT_ASSERT(type->defaultInitializer);
-      CallExpr* call = new CallExpr(type->defaultInitializer);
+      CallExpr* call = new CallExpr("_defaultOf", type->symbol);
       init->replace(call);
-      resolveCall(call);
+      resolveNormalCall(call);
+      // At this point in the compiler, we can resolve the _defaultOf function
+      // for the type, so do so.
       if (call->isResolved())
         resolveFns(call->isResolved());
     }
@@ -7317,7 +7418,11 @@ static void removeRandomPrimitive(CallExpr* call)
     // PRIM_TYPE_INIT replaces the primitive with symexpr that contains a type symbol.
     case PRIM_TYPE_INIT:
     {
+      // A "type init" call that is in the tree should always have a callExpr
+      // parent, as guaranteed by CallExpr::verify().
       CallExpr* parent = toCallExpr(call->parentExpr);
+      // We expect all PRIM_TYPE_INIT primitives to have a PRIM_MOVE
+      // parent, following the insertion of call temps.
       if (parent->isPrimitive(PRIM_MOVE))
         parent->remove();
       else
@@ -7734,28 +7839,7 @@ static void replaceInitPrims(Vec<BaseAST*>& asts)
         else
         {
           Expr* expr = resolvePrimInit(call);
-#if 0
-// Types which are not runtime types should be resolved earlier.
-          if (!expr && rt->defaultInitializer)
-          {
-            if (!rt->defaultInitializer->defPoint->parentSymbol)
-            {
-              // The initializer function is not in the tree, so we have to
-              // insert it.
-              SET_LINENO(rt->defaultInitializer);
-              DefExpr* def = new DefExpr(rt->defaultInitializer);
-              rt->symbol->defPoint->insertBefore(def);
-            }
 
-            SET_LINENO(call);
-            CallExpr* init = new CallExpr(rt->defaultInitializer);
-            call->replace(init);
-            expr = init;
-            resolveCall(init);
-            if (init->isResolved())
-              resolveFns(init->isResolved());
-          }
-#endif
           if (! expr)
           {
             // This PRIM_INIT could not be resolved.

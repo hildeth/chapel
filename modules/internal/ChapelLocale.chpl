@@ -348,44 +348,6 @@ module ChapelLocale {
       return dummyLocale;
   }
 
-  //////////////////////////////////////////
-  //
-  // support for memory management
-  //
-
-  // The allocator pragma is used by scalar replacement.
-  pragma "allocator"
-  pragma "no sync demotion"
-  pragma "locale model alloc"
-  proc chpl_here_alloc(size:int, md:int(16)) {
-    pragma "insert line file info"
-      extern proc chpl_mem_alloc(size:int, md:int(16)) : opaque;
-    return chpl_mem_alloc(size, md + chpl_memhook_md_num());
-  }
-
-  pragma "allocator"
-  pragma "no sync demotion"
-  proc chpl_here_calloc(size:int, number:int, md:int(16)) {
-    pragma "insert line file info"
-      extern proc chpl_mem_calloc(number:int, size:int, md:int(16)) : opaque;
-    return chpl_mem_calloc(number, size, md + chpl_memhook_md_num());
-  }
-
-  pragma "allocator"
-  pragma "no sync demotion"
-  proc chpl_here_realloc(ptr:opaque, size:int, md:int(16)) {
-    pragma "insert line file info"
-      extern proc chpl_mem_realloc(ptr:opaque, size:int, md:int(16)) : opaque;
-    return chpl_mem_realloc(ptr, size, md + chpl_memhook_md_num());
-  }
-
-  pragma "no sync demotion"
-  pragma "locale model free"
-  proc chpl_here_free(ptr:opaque) {
-    pragma "insert line file info"
-      extern proc chpl_mem_free(ptr:opaque): void;
-    chpl_mem_free(ptr);
-  }
 
   pragma "insert line file info"
   extern proc chpl_memhook_malloc_pre(number:int, size:int, md:int(16)): void;
@@ -411,21 +373,21 @@ module ChapelLocale {
 
   proc locale.totalThreads() {
     var totalThreads: int;
-    extern proc chpl_task_getNumThreads() : int;
+    extern proc chpl_task_getNumThreads() : uint(32);
     on this do totalThreads = chpl_task_getNumThreads();
     return totalThreads;
   }
   
   proc locale.idleThreads() {
     var idleThreads: int;
-    extern proc chpl_task_getNumIdleThreads() : int;
+    extern proc chpl_task_getNumIdleThreads() : uint(32);
     on this do idleThreads = chpl_task_getNumIdleThreads();
     return idleThreads;
   }
   
   proc locale.queuedTasks() {
     var queuedTasks: int;
-    extern proc chpl_task_getNumQueuedTasks() : int;
+    extern proc chpl_task_getNumQueuedTasks() : uint(32);
     on this do queuedTasks = chpl_task_getNumQueuedTasks();
     return queuedTasks;
   }
@@ -436,7 +398,7 @@ module ChapelLocale {
   
   proc locale.blockedTasks() {
     var blockedTasks: int;
-    extern proc chpl_task_getNumBlockedTasks() : int;
+    extern proc chpl_task_getNumBlockedTasks() : int(32);
     on this do blockedTasks = chpl_task_getNumBlockedTasks();
     return blockedTasks;
   }
