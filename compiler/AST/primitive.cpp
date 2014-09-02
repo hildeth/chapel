@@ -151,14 +151,6 @@ returnInfoCast(CallExpr* call) {
 }
 
 static Type*
-returnInfoVal(CallExpr* call) {
-  AggregateType* ct = toAggregateType(call->get(1)->typeInfo());
-  if (!ct || !ct->symbol->hasFlag(FLAG_REF))
-    INT_FATAL(call, "attempt to get value type of non-reference type");
-  return ct->getField(1)->type;
-}
-
-static Type*
 returnInfoRef(CallExpr* call) {
   Type* t = call->get(1)->typeInfo();
   if (!t->refType)
@@ -442,7 +434,7 @@ initPrimitive() {
   prim_def(PRIM_QUERY_TYPE_FIELD, "query type field", returnInfoGetMember);
 
   prim_def(PRIM_ADDR_OF, "addr of", returnInfoRef);
-  prim_def(PRIM_DEREF,   "deref",   returnInfoVal, false, true);
+  prim_def(PRIM_DEREF,   "deref",   returnInfoFirstDeref, false, true);
 
   // local block primitives
   prim_def(PRIM_LOCAL_CHECK, "local_check", returnInfoVoid, true, true);
