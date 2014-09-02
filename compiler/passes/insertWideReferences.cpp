@@ -480,26 +480,53 @@ static void widenClasses()
     if (def->sym->hasFlag(FLAG_SUPER_CLASS))
       continue;
 
-    // Note that the following two "if" statements are mutually exclusive.
-
-    // Widen the return type of every function
-    // except those marked "local args".
-    if (FnSymbol* fn = toFnSymbol(def->sym)) {
-      if (!fn->hasEitherFlag(FLAG_EXTERN,FLAG_LOCAL_ARGS))
-        if (Type* wide = wideClassMap.get(fn->retType))
-          // Those returning a string literal can also not be widened.
-          if (!fn->getReturnSymbol()->isImmediate())
-            fn->retType = wide;
-    }
-
-    // Widen all variables, 
-    // and all arguments of functions not marked "extern".
-    if (isVarSymbol(def->sym) || isArgSymbol(def->sym))
+    Type* wide = wideClassMap.get(def->sym->type);
+    // TODO: Put the function's return type in the symbol's type (and eliminate
+    // the retType field).
+    if (!wide && isFnSymbol(def->sym))
     {
-      if (Type* wide = wideClassMap.get(def->sym->type))
-        if (isVarSymbol(def->sym) ||
-            !def->parentSymbol->hasFlag(FLAG_EXTERN))
-          def->sym->type = wide;
+      FnSymbol* fn = toFnSymbol(def->sym);
+      wide = wideClassMap.get(fn->retType);
+    }
+    if (wide)
+    {
+      // Note that the following three "if" statements are mutually exclusive.
+
+      // Widen the return type of every function
+      if (FnSymbol* fn = toFnSymbol(def->sym))
+      {
+        // except those marked "local args".
+        if (fn->hasEitherFlag(FLAG_EXTERN,FLAG_LOCAL_ARGS))
+          continue;
+        // Those returning a string literal can also not be widened.
+        if (fn->getReturnSymbol()->isImmediate())
+          continue;
+
+        fn->retType = wide;
+      }
+
+      // Widen all variables, all fields
+      if (isVarSymbol(def->sym))
+      {
+        // Except, we don't want to widen the field in a ref struct.
+        // We still need a way to represent the type of a narrow ref.
+        if (isTypeSymbol(def->parentSymbol) &&
+            isAggregateType(def->parentSymbol->type) &&
+            def->parentSymbol->hasFlag(FLAG_REF))
+          continue;
+
+        def->sym->type = wide;
+      }
+
+      // Widen all arguments of functions
+      if (isArgSymbol(def->sym))
+      {
+        // Except those marked "extern".
+        if (def->parentSymbol->hasFlag(FLAG_EXTERN))
+          continue;
+
+        def->sym->type = wide;
+      }
     }
   }
 
