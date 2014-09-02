@@ -1019,9 +1019,9 @@ static GenRet codegenWideThingField(GenRet ws, int field)
 #endif
   }
 
-  if( field == WIDE_GEP_SIZE ) {
+  if (field == WIDE_GEP_SIZE) {
     ret.chplType = SIZE_TYPE;
-  } else if( field == WIDE_GEP_LOC ) {
+  } else if (field == WIDE_GEP_LOC) {
     ret.chplType = LOCALE_ID_TYPE;
   }
 
@@ -1416,7 +1416,7 @@ GenRet codegenFieldUidPtr(GenRet base) {
 //  currently only used for the PRIM_ARRAY_SHIFT_BASE_POINTER case.
 //
 static
-GenRet codegenElementPtr(GenRet base, GenRet index, bool ddataPtr=false) {
+GenRet codegenElementPtr(GenRet base, GenRet index, bool ddataPtr=false, bool wide = false) {
   GenRet ret;
   GenInfo* info = gGenInfo;
   Type* baseType = NULL;
@@ -1452,7 +1452,11 @@ GenRet codegenElementPtr(GenRet base, GenRet index, bool ddataPtr=false) {
         ret.isUnsigned = true;
         return ret;
       } else {
-        return codegenWideAddrWithAddr(base, newAddr);
+        if (wide)
+          // Preserve the base type.
+          return codegenWideAddrWithAddr(base, newAddr, baseType);
+        else
+          return codegenWideAddrWithAddr(base, newAddr);
       }
     }
   }
@@ -3674,7 +3678,9 @@ GenRet CallExpr::codegen() {
         // Used to handle FLAG_WIDE_CLASS/FLAG_STAR_TUPLE specially,
         // but these should be taken care of by codegenElementPtr and
         // codegenAssign now.
-        GenRet elementPtr = codegenElementPtr(get(1), get(2));
+        bool wide = get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS);
+        GenRet elementPtr = codegenElementPtr(get(1), get(2),
+                                              /*ddataPtr=*/ false, wide);
         codegenAssign(elementPtr, get(3));
         break;
       }
@@ -3759,6 +3765,36 @@ GenRet CallExpr::codegen() {
         {
          case PRIM_DEREF:
          {
+          // The cases below work only if the LHS is narrow.
+          if (get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS))
+          {
+            if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE) ||
+                call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS))
+            {
+              Type* valueType = call->get(1)->getValType();
+              if (valueType == dtString)
+              {
+                // This is probably not right.
+                codegenCall(
+                  "chpl_comm_wide_get_string",
+                  codegenLocalAddrOf(get(1)),
+                  codegenLocalAddrOf(call->get(1)), 
+                  genTypeStructureIndex(valueType->symbol),
+                  call->get(2),
+                  call->get(3));
+                codegenCall("chpl_string_widen", codegenAddrOf(get(1)), get(1),
+                            get(3), get(4)); 
+              }
+              else {
+                // set get(1) = *(call->get(1));
+                codegenAssign(get(1),
+                              codegenAddrOf(codegenWideHere(codegenDeref(call->get(1)))));
+              
+              }
+            }
+          }
+          else
+          {
           if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE) ||
               call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS)) {
             Type* valueType;
@@ -3766,7 +3802,7 @@ GenRet CallExpr::codegen() {
               valueType = call->get(1)->getValType();
             else
               valueType = call->get(1)->typeInfo()->getField("addr")->type;
-            INT_ASSERT(valueType == get(1)->typeInfo());
+//            INT_ASSERT(valueType == get(1)->typeInfo());
             if (valueType == dtString) {
               codegenCall(
                   "chpl_comm_wide_get_string",
@@ -3790,6 +3826,7 @@ GenRet CallExpr::codegen() {
           } else {
             // set get(1) = *(call->get(1));
             codegenAssign(get(1),codegenDeref(call->get(1)));
+          }
           }
           break;
          }
@@ -3885,8 +3922,9 @@ GenRet CallExpr::codegen() {
           /* Get a pointer to the i'th array element */
           // ('_array_get' array idx)
           if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS)) {
+            // We assume that the "array" thingy here is represented by a ddata pointer.
             codegenAssign(get(1),
-                codegenAddrOf(codegenElementPtr(call->get(1), call->get(2))));
+                          codegenElementPtr(call->get(1), call->get(2), false, true));
           } else if( get(1)->typeInfo()->symbol->hasEitherFlag(FLAG_WIDE,FLAG_WIDE_CLASS)) {
             // resulting reference is wide, but the array is local.
             // This can happen with c_ptr for extern integration...
@@ -4033,6 +4071,33 @@ GenRet CallExpr::codegen() {
                           dst, src, call->get(2), call->get(3));
             }
           }
+          break;
+         }
+         case PRIM_ADDR_OF:
+         {
+          if (get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE))
+          {
+            if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS))
+            {
+              if (get(2)->typeInfo()->getValType() == dtString)
+              {
+#if 0
+                // To be supplied.
+                codegenAssign(get(1),
+                              codegenWideStringAddrWithAddr(call->get(1),
+                                                            codegenRaddr(call->get(1))));
+#endif
+              }
+              else
+                codegenAssign(get(1),
+                              codegenWideAddrWithAddr(call->get(1),
+                                                      codegenRaddr(call->get(1))));
+            }
+            else
+              handled = false;
+          }
+          else
+            handled = false;
           break;
          }
          default:
@@ -4381,9 +4446,13 @@ GenRet CallExpr::codegen() {
         else
           codegenCall("chpl_string_widen", codegenAddrOf(get(1)), get(2),
                       get(3), get(4));
-      } else if (get(1)->typeInfo()->symbol->hasFlag(FLAG_REF) ||
-          get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE) ||
-          get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS)) {
+      } else if (get(1)->typeInfo()->symbol->hasFlag(FLAG_REF)) {
+        if (get(2)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS))
+          codegenAssign(codegenDeref(get(1)), codegenDeref(get(2)));
+        else
+          codegenAssign(codegenDeref(get(1)), get(2));
+      } else if (get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE) ||
+                 get(1)->typeInfo()->symbol->hasFlag(FLAG_WIDE_CLASS)) {
         codegenAssign(codegenDeref(get(1)), get(2));
       } else {
         codegenAssign(get(1), get(2));
@@ -5378,16 +5447,15 @@ GenRet CallExpr::codegen() {
     GenRet endCountPtr =
       codegenValue(
           codegenFieldPtr(get(1), bundledArgsType->getField(endCountField)));
-    Type *endCountType = bundledArgsType->getField(endCountField)->typeInfo();
     // endCount is either an address or {locale, ptr} -- it is a class.
     GenRet endCountValue = codegenValue(endCountPtr);
-    GenRet taskList;
+    while(endCountValue.chplType->symbol->hasEitherFlag(FLAG_WIDE,FLAG_REF))
+      endCountValue = codegenLocalDeref(endCountValue);
 
+    Type *endCountType = endCountValue.chplType;
+    GenRet taskList;
     if (endCountType->symbol->hasFlag(FLAG_WIDE)) {
       GenRet node = codegenRnode(endCountValue);
-      while(endCountValue.chplType->symbol->hasEitherFlag(FLAG_WIDE,FLAG_REF)){
-        endCountValue = codegenLocalDeref(endCountValue);
-      }
       // Now, we should have a wide pointer to a class
       // make it into a local pointer to a class.
       endCountValue = codegenRaddr(endCountValue);
