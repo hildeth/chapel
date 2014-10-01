@@ -1,0 +1,8 @@
+semantic: Noinit does not exhibit the specified behavior when applied to a variable of class type.
+
+My expectations on reading the spec was that the variable would be left
+uninitialized and probably lead to a segfault.  Instead the class variable is
+value-initialized to nil even when the "= noinit" initializer is present.
+
+My recommendation is to update the spec, so the expected behavior is that class
+variables are always initialized to nil.
