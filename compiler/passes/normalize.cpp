@@ -556,7 +556,7 @@ static void normalize_returns(FnSymbol* fn) {
         if (fn->hasFlag(FLAG_CONSTRUCTOR) ||
             fn->hasFlag(FLAG_TYPE_CONSTRUCTOR) ||
             !strncmp("_if_fn", fn->name, 6) ||
-            !strcmp("=", fn->name) ||
+//            !strcmp("=", fn->name) ||
             !strcmp("_init", fn->name) ||
             !strcmp("_ret", se->var->name)) {
           return;   // Yup.
@@ -1053,9 +1053,9 @@ static void init_typed_var(VarSymbol* var, Expr* type, Expr* init, Expr* stmt, V
       block->insertAtTail(initCall);
 
       if (init) {
-        // This should be copy-initialization, not assignment.
-        block->insertAtTail(new CallExpr("=", typeTemp, init->remove()));
-        block->insertAtTail(new CallExpr(PRIM_MOVE, constTemp, typeTemp));
+        block->insertAtTail(
+          new CallExpr(PRIM_MOVE, constTemp,
+                       new CallExpr("chpl__initCopy", init->remove())));
       } else {
         if (constTemp->hasFlag(FLAG_TYPE_VARIABLE))
           block->insertAtTail(new CallExpr(PRIM_MOVE, constTemp,

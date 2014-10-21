@@ -5550,7 +5550,6 @@ requiresImplicitDestroy(CallExpr* call) {
         !fn->retType->symbol->hasFlag(FLAG_RUNTIME_TYPE_VALUE) &&
         !fn->hasFlag(FLAG_DONOR_FN) &&
         !fn->hasFlag(FLAG_INIT_COPY_FN) &&
-        strcmp(fn->name, "=") &&
         strcmp(fn->name, "_defaultOf") &&
         !fn->hasFlag(FLAG_AUTO_II) &&
         !fn->hasFlag(FLAG_CONSTRUCTOR) &&
