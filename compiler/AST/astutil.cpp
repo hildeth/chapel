@@ -399,6 +399,11 @@ int isDefAndOrUse(SymExpr* se) {
       return 3;
     } else if (FnSymbol* fn = call->isResolved()) {
       ArgSymbol* arg = actual_to_formal(se);
+      // Are there any assignments remaining that do not have ref intent on
+      // their LHS args?
+      if (!strcmp(fn->name, "=") && fn->getFormal(1) == arg)
+        if (arg->intent != INTENT_REF)
+          INT_FATAL(arg, "Expected LHS argument of '=' to be passed by ref.");
       if (arg->intent == INTENT_REF ||
           arg->intent == INTENT_INOUT ||
           (!strcmp(fn->name, "=") && fn->getFormal(1) == arg && isRecord(arg->type)) ||
