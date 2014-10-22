@@ -556,7 +556,7 @@ static void normalize_returns(FnSymbol* fn) {
         if (fn->hasFlag(FLAG_CONSTRUCTOR) ||
             fn->hasFlag(FLAG_TYPE_CONSTRUCTOR) ||
             !strncmp("_if_fn", fn->name, 6) ||
-            !strcmp("=", fn->name) ||
+//            !strcmp("=", fn->name) ||
             !strcmp("_init", fn->name) ||
             !strcmp("_ret", se->var->name)) {
           return;   // Yup.
@@ -1043,20 +1043,24 @@ static void init_typed_var(VarSymbol* var, Expr* type, Expr* init, Expr* stmt, V
       // Create an empty type block.
       BlockStmt* block = new BlockStmt(NULL, BLOCK_SCOPELESS);
 
-      VarSymbol* typeTemp = newTemp("type_tmp");
-      block->insertAtTail(new DefExpr(typeTemp));
-
-      CallExpr* initCall;
-      initCall = new CallExpr(PRIM_MOVE, typeTemp,
-                   new CallExpr(PRIM_INIT, type->remove()));
-
-      block->insertAtTail(initCall);
-
       if (init) {
-        // This should be copy-initialization, not assignment.
-        block->insertAtTail(new CallExpr("=", typeTemp, init->remove()));
-        block->insertAtTail(new CallExpr(PRIM_MOVE, constTemp, typeTemp));
+        VarSymbol* initTemp = newTemp("init_tmp");
+        block->insertAtTail(new DefExpr(initTemp));
+        block->insertAtTail(new CallExpr(PRIM_MOVE, initTemp, init->remove()));
+        block->insertAtTail(
+          new CallExpr(PRIM_MOVE, constTemp,
+                       new CallExpr("chpl__initCopy", type->remove(), initTemp)));
       } else {
+        VarSymbol* typeTemp = newTemp("type_tmp");
+        block->insertAtTail(new DefExpr(typeTemp));
+
+        CallExpr* initCall;
+        initCall = new CallExpr(PRIM_MOVE, typeTemp,
+                                // Can we just call "_defaultOf" here?
+                                new CallExpr(PRIM_INIT, type->remove()));
+
+        block->insertAtTail(initCall);
+
         if (constTemp->hasFlag(FLAG_TYPE_VARIABLE))
           block->insertAtTail(new CallExpr(PRIM_MOVE, constTemp,
                                            new CallExpr(PRIM_TYPEOF, typeTemp)));
