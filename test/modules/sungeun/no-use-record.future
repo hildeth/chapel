@@ -1,2 +1,7 @@
 bug: Cannot use a record type from another module without using the module.
 
+This bug now manifests itself as a failure to resolve the _defaultOf() function for the 
+type in question.  
+Arguably, the error message should be better even if this particular test case passes, 
+because a user failing to supply a definition for a given record type is likely to be a 
+fairly common error.

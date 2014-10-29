@@ -292,17 +292,8 @@ extern proc _defaultOfMemoryOrder(): memory_order;
 
 pragma "no instantiation limit"
 pragma "compiler generated"
-inline proc _defaultOf(type t) {
-  select t {
-    when memory_order {
-      return _defaultOfMemoryOrder();
-    }
-    otherwise {
-      return nil:t;
-    }
-  }
-}
-
+inline proc _defaultOf(type t) where t: memory_order
+  return _defaultOfMemoryOrder();
 
 
 // Returns true if it is legal to coerce t1 to t2, false otherwise.

@@ -704,6 +704,10 @@ module ChapelBase {
       return __primitive("array_get", this, i);
     }
   }
+
+  // The test isClassType() relies on inheritance from object, so we have to
+  // special-case _defaultOf() for classes here. :-(
+  inline proc _defaultOf(type t) where t: _ddata return nil:t;
   
   inline proc =(ref a: _ddata(?t), b: _ddata(t)) {
     __primitive("=", a, b);

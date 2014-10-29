@@ -1,0 +1,4 @@
+#!/bin/bash
+# The list of available functions is likely to be noise, so lets just elide it.
+grep -v "note:" $2 > $1.prediff.tmp
+mv -f $1.prediff.tmp $2
