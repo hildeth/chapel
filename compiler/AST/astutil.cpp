@@ -393,24 +393,35 @@ bool isRelationalOperator(CallExpr* call) {
 // return & 1 is true if se is a def
 // return & 2 is true if se is a use
 //
-int isDefAndOrUse(SymExpr* se) {
-  if (CallExpr* call = toCallExpr(se->parentExpr)) {
-    if ((call->isPrimitive(PRIM_MOVE) || call->isPrimitive(PRIM_ASSIGN)) &&
-        call->get(1) == se) {
-      return 1;
-    } else if (isOpEqualPrim(call) && call->get(1) == se) {
-      return 3;
-    } else if (FnSymbol* fn = call->isResolved()) {
+int isDefAndOrUse(SymExpr* se)
+{
+  if (CallExpr* call = toCallExpr(se->parentExpr))
+  {
+    if (FnSymbol* fn = call->isResolved())
+    {
       ArgSymbol* arg = actual_to_formal(se);
+
+      if (arg->intent == INTENT_OUT)
+        return 1; // Always a def
+
       if (arg->intent == INTENT_REF ||
           arg->intent == INTENT_INOUT ||
-          (!strcmp(fn->name, "=") && fn->getFormal(1) == arg && isRecord(arg->type)) ||
-          isRecordWrappedType(arg->type)) { // pass by reference
+          isRecordWrappedType(arg->type))
+        return 3; // passed by reference
+
+      // TODO: Remove this clause after it is dead code.  The LHS should
+      // always be passed by ref in this case, but there are still some exceptions.
+      if (!strcmp(fn->name, "=") && fn->getFormal(1) == arg && isRecord(arg->type))
         return 3;
-        // also use; do not "continue"
-      } else if (arg->intent == INTENT_OUT) {
+    }
+    else // a primitive
+    {
+      if ((call->isPrimitive(PRIM_MOVE) || call->isPrimitive(PRIM_ASSIGN)) &&
+          call->get(1) == se)
         return 1;
-      }
+
+      if (isOpEqualPrim(call) && call->get(1) == se)
+        return 3;
     }
   }
   return 2;
