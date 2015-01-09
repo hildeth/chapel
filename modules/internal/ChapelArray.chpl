@@ -2110,6 +2110,9 @@ module ChapelArray {
   }
   
   proc =(ref a: domain, b: domain) {
+    if b._value == nil {
+      __primitive("move", a, b);
+    } else
     if !isIrregularDom(a) && !isIrregularDom(b) {
       for e in a._value._arrs do {
         on e do e.dsiReallocate(b);
