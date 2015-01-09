@@ -672,6 +672,8 @@ static void
 fixupDestructors() {
   forv_Vec(FnSymbol, fn, gFnSymbols) {
     if (fn->hasFlag(FLAG_DESTRUCTOR)) {
+      // TODO: Populating the compiler-supplied destructor should be done in
+      // the buildDefaultFunctions pass, not here.
       AggregateType* ct = toAggregateType(fn->_this->getValType());
       INT_ASSERT(ct);
 
@@ -680,6 +682,7 @@ fixupDestructors() {
       //
       for_fields_backward(field, ct) {
         SET_LINENO(field);
+#if ! HILDE_MM
         if (field->type->destructor) {
           AggregateType* fct = toAggregateType(field->type);
           INT_ASSERT(fct);
@@ -694,7 +697,6 @@ fixupDestructors() {
               fn->insertBeforeReturnAfterLabel(new CallExpr(autoDestroyFn, tmp));
             else
               fn->insertBeforeReturnAfterLabel(new CallExpr(field->type->destructor, tmp)); 
-
             // WORKAROUND:
             // This is a temporary bug fix that results in leaked memory
             //  for sync and single vars in user defined records.
@@ -723,7 +725,9 @@ fixupDestructors() {
                  (ct->getModule()->modTag==MOD_STANDARD)))
               fn->insertBeforeReturnAfterLabel(callChplHereFree(tmp));
           }
-        } else if (FnSymbol* autoDestroyFn = autoDestroyMap.get(field->type)) {
+        } else
+#endif
+        if (FnSymbol* autoDestroyFn = autoDestroyMap.get(field->type)) {
           VarSymbol* tmp = newTemp("_field_destructor_tmp_", field->type);
           fn->insertBeforeReturnAfterLabel(new DefExpr(tmp));
           fn->insertBeforeReturnAfterLabel(
