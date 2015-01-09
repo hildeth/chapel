@@ -71,7 +71,8 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn) {
 
   fn->basicBlocks->push_back(BasicBlock::steal());
 
-  INT_ASSERT(verifyBasicBlocks(fn));
+  if (fVerify)
+    INT_ASSERT(verifyBasicBlocks(fn));
 }
 
 BasicBlock* BasicBlock::steal() {
@@ -202,9 +203,11 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     LabelSymbol* label = toLabelSymbol(toSymExpr(s->label)->var);
 
     if (BasicBlock* bb = labelMaps.get(label)) {
+      // Thread this block to its destination label.
       thread(basicBlock, bb);
 
     } else {
+      // Set up goto map, so this block's successor can be back-patched later.
       std::vector<BasicBlock*>* vbb = gotoMaps.get(label);
 
       if (!vbb)
@@ -216,6 +219,10 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     }
 
     append(s, mark); // Put the goto at the end of its block.
+
+    // We need a new block, so we can not thread the one containing the goto to
+    // this new one.  There is a break in the flow.  If the new block does not
+    // begin with a label, it is unreachable and can be removed.
     restart(fn);
 
   } else {
@@ -275,6 +282,12 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
 }
 
 void BasicBlock::restart(FnSymbol* fn) {
+  if (basicBlock->exprs.size() == 0 &&
+      basicBlock->ins.size() ==0)
+    // The current block is empty and has no predecessors, so we don't need to
+    // open a new one.
+    // A block that has no predecessors and is not empty indicates a problem.
+    return;
   fn->basicBlocks->push_back(steal());
   basicBlock = new BasicBlock();
 }
@@ -293,7 +306,26 @@ void BasicBlock::thread(BasicBlock* src, BasicBlock* dst) {
 
 // Returns true if the basic block structure is OK, false otherwise.
 bool BasicBlock::verifyBasicBlocks(FnSymbol* fn) {
-  for_vector(BasicBlock, bb, *fn->basicBlocks) {
+  bool first = true;
+  for_vector(BasicBlock, bb, *fn->basicBlocks)
+  {
+    if (first)
+    {
+      // Applies only to the first block.
+      first = false;
+    }
+    else
+    {
+      // Applies to all but the first block.
+#if 0
+      // TODO this, and then fix the folding of param conditionals so the
+      // unreachable code is removed.
+      if (bb->ins.size() == 0)
+        // Every interior block must have a predecessor.
+        return false;
+#endif
+    }
+
     if (bb->isOK() == false)
       return false;
   }
