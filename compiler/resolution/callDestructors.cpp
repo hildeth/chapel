@@ -28,6 +28,7 @@
 #include "symbol.h"
 
 
+#ifndef HILDE_MM
 // Clear autoDestroy flags on variables that get assigned to the return value of
 // certain functions.
 //
@@ -55,9 +56,8 @@ static void cullAutoDestroyFlags()
       if (ts->hasFlag(FLAG_ARRAY) ||
           ts->hasFlag(FLAG_DOMAIN) ||
           ts->hasFlag(FLAG_SYNC) ||
-          ts->hasFlag(FLAG_SINGLE)) {
+          ts->hasFlag(FLAG_SINGLE))
         ret->removeFlag(FLAG_INSERT_AUTO_DESTROY);
-      }
       // Do we need to add other record-wrapped types here?  Testing will tell.
 
       // NOTE 1: When the value of a record field is established in a default
@@ -664,7 +664,7 @@ returnRecordsByReferenceArguments() {
   }
   freeDefUseMaps(defMap, useMap);
 }
-
+#endif
 
 static void
 fixupDestructors() {
@@ -794,7 +794,7 @@ static void insertDestructorCalls()
   }
 }
 
-
+#ifndef HILDE_MM
 static void insertAutoCopyTemps()
 {
   Map<Symbol*,Vec<SymExpr*>*> defMap;
@@ -825,7 +825,7 @@ static void insertAutoCopyTemps()
 
   freeDefUseMaps(defMap, useMap);
 }
-
+#endif
 
 // This routine inserts autoCopy calls ahead of yield statements as necessary,
 // so the calling routine "owns" the returned value.
@@ -907,11 +907,13 @@ void
 callDestructors() {
   fixupDestructors();
   insertDestructorCalls();
+#ifndef HILDE_MM
   insertAutoCopyTemps();
   cullAutoDestroyFlags();
   cullExplicitAutoDestroyFlags();
   insertAutoDestroyCalls();
   returnRecordsByReferenceArguments();
+#endif
   insertYieldTemps();
   insertGlobalAutoDestroyCalls();
   insertReferenceTemps();
