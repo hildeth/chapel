@@ -27,6 +27,7 @@
 #include "resolution.h"
 
 #include "astutil.h"
+#include "stlUtil.h"
 #include "build.h"
 #include "caches.h"
 #include "callInfo.h"
@@ -42,6 +43,7 @@
 #include "stringutil.h"
 #include "symbol.h"
 #include "WhileStmt.h"
+#include "bb.h"
 
 #include "../ifa/prim_data.h"
 
@@ -379,6 +381,9 @@ static void handleRuntimeTypes();
 static void pruneResolvedTree();
 static void removeCompilerWarnings();
 static void removeUnusedFunctions();
+static void removeDeadBlocks();
+static bool removeDeadBlocks(FnSymbol* fn);
+static void removeEmptyStmts(FnSymbol* fn);
 static void removeUnusedTypes();
 static void buildRuntimeTypeInitFns();
 static void buildRuntimeTypeInitFn(FnSymbol* fn, Type* runtimeType);
@@ -7353,6 +7358,7 @@ static void
 pruneResolvedTree() {
 
   removeUnusedFunctions();
+  removeDeadBlocks();
   removeRandomPrimitives();
   replaceTypeArgsWithFormalTypeTemps();
   removeParamArgs();
@@ -7377,6 +7383,77 @@ static void removeUnusedFunctions() {
       if (! fn->isResolved() || fn->retTag == RET_PARAM)
         fn->defPoint->remove();
     }
+  }
+}
+
+static void removeDeadBlocks()
+{
+  forv_Vec(FnSymbol, fn, gFnSymbols)
+  {
+    // Skip functions that are not in the tree.
+    if (!fn->defPoint || !fn->defPoint->parentSymbol)
+      continue;
+
+    // Repeat until no more change.
+    bool changed;
+    do {
+      changed = removeDeadBlocks(fn);
+      removeEmptyStmts(fn);
+    } while(changed);
+  }
+}
+
+static bool removeDeadBlocks(FnSymbol* fn)
+{
+  bool changed = false;
+
+  BasicBlock::buildBasicBlocks(fn);
+
+  // Traverse the basic blocks.
+  size_t nbbs = fn->basicBlocks->size();
+  // Note that we skip Block 0.
+  // We want to keep Block 0 even though it has no predecessors.
+  for (size_t i = 1; i < nbbs; i++)
+  {
+    BasicBlock* bb = (*fn->basicBlocks)[i];
+    if (bb->ins.size() == 0)
+    {
+      changed = true;
+      // This block has no predecessors.
+
+      // Remove it from the basic block structure.
+      bb->remove();
+
+      // Traverse its list of expressions and remove them from the AST.
+      for_vector(Expr, expr, bb->exprs)
+        expr->remove();
+    }
+  }
+
+  return changed;
+}
+
+static void removeEmptyStmts(FnSymbol* fn)
+{
+  std::vector<Expr*> stmts;
+  collect_stmts_postorder_STL(fn->body, stmts);
+
+  for_vector(Expr, stmt, stmts)
+  {
+    if (BlockStmt* block = toBlockStmt(stmt))
+      if (block->body.length == 0)
+        block->remove();
+
+    if (CondStmt* cs = toCondStmt(stmt))
+      if (cs->condExpr == NULL)
+        // The conditional was removed as dead code, so we can just kill the
+        // whole statement: No need to try to preserve the "then" or "else"
+        // blocks.
+        cs->remove();
+
+    if (CallExpr* call = toCallExpr(stmt))
+      if (call->isPrimitive(PRIM_NOOP))
+        call->remove();
   }
 }
 

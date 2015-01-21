@@ -150,28 +150,44 @@ void deadExpressionElimination(FnSymbol* fn) {
     } else if (CondStmt* cond = toCondStmt(ast)) {
       // Compensate for deadBlockElimination
       if (cond->condExpr == NULL) {
+        // The conditional block was removed because it is unreachable, so the
+        // "then" and "else" clauses become unreachable as well.
         cond->remove();
+      }
+      else
+      {
+        if (cond->thenStmt == NULL)
+        {
+          if (cond->elseStmt == NULL)
+          {
+            // The "then" and "else" clauses are both empty, so the entire
+            // conditional is moot.
+            // We don't have to execute the condExpr for side-effects, because
+            // it should have been normalized to a temporary.  Let's check:
+            INT_ASSERT(isSymExpr(cond->condExpr));
+            cond->remove();
+          }
+          else
+          {
+            // The "then" clause is empty, but the condExpr and elseExpr
+            // clauses are not.
+            // Invert the condition and swap the dependent clauses.
+            SET_LINENO(cond);
 
-      } else if (cond->thenStmt == NULL && cond->elseStmt == NULL) {
-        cond->remove();
+            VarSymbol* tmp = newTemp("_cond_tmp_", cond->condExpr->typeInfo());
+            cond->insertBefore(new DefExpr(tmp));
+            CallExpr* condExpr = new CallExpr(PRIM_UNARY_LNOT, cond->condExpr->remove());
+            cond->insertBefore(new CallExpr(PRIM_MOVE, tmp, condExpr));
+            cond->condExpr = new SymExpr(tmp);
+            insert_help(cond->condExpr, cond, cond->parentSymbol);
+            cond->thenStmt = toBlockStmt(cond->elseStmt->remove());
+            insert_help(cond->thenStmt, cond, cond->parentSymbol);
+          }
 
-      } else {
-
-        // Invert the condition and shuffle the alternative
-        if (cond->thenStmt == NULL) {
-          Expr* condExpr = new CallExpr(PRIM_UNARY_LNOT, cond->condExpr);
-
-          cond->replaceChild(cond->condExpr, condExpr);
-          cond->replaceChild(cond->thenStmt, cond->elseStmt);
-          cond->replaceChild(cond->elseStmt, NULL);
-
-        // NOAKES 2014/11/14 It's "odd" that folding is being done here
-        } else {
-          cond->foldConstantCondition();
+          // 2014/01/20 hilde: Now reached due to addition of dead block
+          // elimination in functionResolution!
+          removeDeadIterResumeGotos();
         }
-
-        // NOAKES 2014/11/14 Testing suggests this is always a NOP
-        removeDeadIterResumeGotos();
       }
     }
   }

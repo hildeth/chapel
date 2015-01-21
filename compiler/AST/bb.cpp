@@ -300,6 +300,43 @@ void BasicBlock::thread(BasicBlock* src, BasicBlock* dst) {
   src->outs.push_back(dst);
 }
 
+// Removes a block from the basic block structure by traversing its lists of
+// predecessors and successors and removing any back-links.
+// The caller must then remove this block from any container and free it.
+void BasicBlock::remove()
+{
+  for_vector(BasicBlock, pred, this->ins)
+  {
+    BasicBlockVector& pred_outs = pred->outs;
+
+    // Look for this block in the list of successors of this predecessor.
+    BasicBlockVector::iterator i;
+    for (i = pred_outs.begin(); i != pred_outs.end(); ++i)
+    {
+      if (*i == this)
+        break;
+    }
+
+    // This block is in the list, right?
+    INT_ASSERT(i != pred_outs.end());
+    pred_outs.erase(i);
+  }
+  
+  for_vector(BasicBlock, succ, this->outs)
+  {
+    BasicBlockVector& succ_ins = succ->ins;
+
+    // Look for this block in the list of predecessors of this successor.
+    BasicBlockVector::iterator i;
+    for (i = succ_ins.begin(); i != succ_ins.end(); ++i)
+      if (*i == this)
+        break;
+
+    INT_ASSERT(i != succ_ins.end());
+    succ_ins.erase(i);
+  }
+}
+
 // Look for and remove empty blocks with no predecessor and whose successor is
 // the next block in sequence.  These blocks get created when a block ends in a
 // goto statement and the enclosing construct calls restart immediately.
@@ -311,24 +348,18 @@ void BasicBlock::removeEmptyBlocks(FnSymbol* fn)
   // Create a new vector that contains just the items we want to preserve.
   int new_id = 0;
   BasicBlockVector* new_blocks = new BasicBlockVector();
-  for_vector(BasicBlock, bb, *fn->basicBlocks)
+  size_t nbbs = fn->basicBlocks->size();
+  for (size_t i = 0; i < nbbs; ++i)
   {
-    // Skip empty blocks with no predecessors.
-    if (bb->ins.size() == 0 &&
-        bb->exprs.size() == 0)
+    BasicBlock* bb = (*fn->basicBlocks)[i];
+
+    // Look for empty blocks with no predecessors.
+    if (bb->ins.size() == 0 && bb->exprs.size() == 0)
     {
       // This block will be removed.  It is no longer a predecessor of anyone,
       // so we must update the back links.
-      for_vector(BasicBlock, succ, bb->outs)
-      {
-        BasicBlockVector::iterator i;
-        for (i = succ->ins.begin(); i != succ->ins.end(); ++i)
-          if (*i == bb)
-            break;
-
-        INT_ASSERT(i != succ->ins.end());
-        succ->ins.erase(i);
-      }
+      bb->remove();
+      delete bb; bb = 0;
     }
     else
     {

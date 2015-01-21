@@ -120,6 +120,8 @@ public:
   BasicBlockVector  ins;
   BasicBlockVector  outs;
 
+  void remove();
+
 private:
   bool                      isOK();
 };

@@ -76,6 +76,15 @@ void collect_stmts_STL(BaseAST* ast, std::vector<Expr*>& stmts) {
   }
 }
 
+void collect_stmts_postorder_STL(BaseAST* ast, std::vector<Expr*>& stmts) {
+  if (Expr* expr = toExpr(ast)) {
+    if (isBlockStmt(expr) || isCondStmt(expr)) {
+      AST_CHILDREN_CALL(ast, collect_stmts_postorder_STL, stmts);
+    }
+    stmts.push_back(expr);
+  }
+}
+
 void collectDefExprs(BaseAST* ast, Vec<DefExpr*>& defExprs) {
   AST_CHILDREN_CALL(ast, collectDefExprs, defExprs);
   if (DefExpr* defExpr = toDefExpr(ast))
