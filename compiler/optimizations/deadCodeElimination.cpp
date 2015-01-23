@@ -156,6 +156,10 @@ void deadExpressionElimination(FnSymbol* fn) {
       }
       else
       {
+#if 1
+        if (cond->thenStmt == NULL && cond->thenStmt == NULL)        
+          cond->remove();
+#else
         if (cond->thenStmt == NULL)
         {
           if (cond->elseStmt == NULL)
@@ -188,6 +192,7 @@ void deadExpressionElimination(FnSymbol* fn) {
           // elimination in functionResolution!
           removeDeadIterResumeGotos();
         }
+#endif
       }
     }
   }

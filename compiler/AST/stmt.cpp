@@ -489,15 +489,24 @@ CondStmt::CondStmt(Expr* iCondExpr, BaseAST* iThenStmt, BaseAST* iElseStmt) :
   thenStmt(NULL),
   elseStmt(NULL) {
 
-  if (Expr* s = toExpr(iThenStmt)) {
-    BlockStmt* bs = toBlockStmt(s);
+  if (fVerify) {
+    if (iCondExpr == NULL)
+      INT_FATAL(iCondExpr, "Invalid CondStmt constructor call -- empty conditional.");
+    if (iThenStmt == NULL && iElseStmt == NULL)
+      INT_FATAL(iCondExpr, "Invalid CondStmt constructor call -- both 'then' and 'else' clauses empty.");
+  }
 
-    if (bs && bs->blockTag == BLOCK_NORMAL && !bs->blockInfoGet())
-      thenStmt = bs;
-    else
-      thenStmt = new BlockStmt(s);
-  } else {
-    INT_FATAL(iThenStmt, "Bad then-stmt passed to CondStmt constructor");
+  if (iThenStmt) {
+    if (Expr* s = toExpr(iThenStmt)) {
+      BlockStmt* bs = toBlockStmt(s);
+
+      if (bs && bs->blockTag == BLOCK_NORMAL && !bs->blockInfoGet())
+        thenStmt = bs;
+      else
+        thenStmt = new BlockStmt(s);
+    } else {
+      INT_FATAL(iThenStmt, "Bad then-stmt passed to CondStmt constructor");
+    }
   }
 
   if (iElseStmt) {
@@ -534,9 +543,12 @@ CondStmt::foldConstantCondition() {
         if (var->immediate->bool_value() == gTrue->immediate->bool_value()) {
           Expr* then_stmt = thenStmt;
 
-          then_stmt->remove();
-          replace(then_stmt);
-
+          if (then_stmt) {
+            then_stmt->remove();
+            replace(then_stmt);
+          } else {
+            remove();
+          }
         } else {
           Expr* else_stmt = elseStmt;
 
@@ -566,15 +578,31 @@ CondStmt::verify() {
     INT_FATAL(this, "CondStmt has no condExpr");
   }
 
+#if 0
+  // 2015/01/22 hilde: Actually, there's no reason why cond statements cannot
+  // be symmetrical.  This case was uncovered in early removal of dead blocks,
+  // which collapses empty blocks down to NULL.  The source code starts out as 
+  //    if this.localLocID == localLocID &&
+  //       this.localLocIDlegit == localLocIDlegit {
+  //      // alright, let it be for now
+  //    } else {
+  //      halt("Inconsistent locale cache in a ReplicatedDim descriptor object. One cause can be a reuse of such an object for different DimensionalDist objects whose target locales differ and/or this object is reused in a different dimension.");
+  //    }
+  // The populated CondStmt has a block in the thenExpr slot, but the block is
+  // for sure empty.  So why not let it pass and deal with empty thenExprs
+  // downstream?
+  // Note that this also allows us to avoid the case inversion in
+  // deadBlockElimination (which was not formerly reached, and never worked anyway).
   if (!thenStmt) {
     INT_FATAL(this, "CondStmt has no thenStmt");
   }
+#endif
 
   if (condExpr->list) {
     INT_FATAL(this, "CondStmt::condExpr is a list");
   }
-
-  if (thenStmt->list) {
+  
+  if (thenStmt && thenStmt->list) {
     INT_FATAL(this, "CondStmt::thenStmt is a list");
   }
 
@@ -585,7 +613,7 @@ CondStmt::verify() {
   if (condExpr->parentExpr != this)
     INT_FATAL(this, "Bad CondStmt::condExpr::parentExpr");
 
-  if (thenStmt->parentExpr != this)
+  if (thenStmt && thenStmt->parentExpr != this)
     INT_FATAL(this, "Bad CondStmt::thenStmt::parentExpr");
 
   if (elseStmt && elseStmt->parentExpr != this)
@@ -629,7 +657,10 @@ CondStmt::codegen() {
   if ( outfile ) {
     info->cStatements.push_back("if (" + codegenValue(condExpr).c + ") ");
 
-    thenStmt->codegen();
+    if (thenStmt)
+      thenStmt->codegen();
+    else
+      info->cStatements.push_back("{ /* empty */ } ");
 
     if (elseStmt) {
       info->cStatements.push_back(" else ");
@@ -685,14 +716,16 @@ CondStmt::codegen() {
         condStmtThen,
         (elseStmt) ? condStmtElse : condStmtEnd);
 
-    func->getBasicBlockList().push_back(condStmtThen);
-    info->builder->SetInsertPoint(condStmtThen);
+    if(elseStmt) {
+      func->getBasicBlockList().push_back(condStmtThen);
+      info->builder->SetInsertPoint(condStmtThen);
 
-    info->lvt->addLayer();
-    thenStmt->codegen();
+      info->lvt->addLayer();
+      thenStmt->codegen();
 
-    info->builder->CreateBr(condStmtEnd);
-    info->lvt->removeLayer();
+      info->builder->CreateBr(condStmtEnd);
+      info->lvt->removeLayer();
+    }
 
     if(elseStmt) {
       func->getBasicBlockList().push_back(condStmtElse);
@@ -700,6 +733,7 @@ CondStmt::codegen() {
 
       info->lvt->addLayer();
       elseStmt->codegen();
+
       info->builder->CreateBr(condStmtEnd);
       info->lvt->removeLayer();
     }

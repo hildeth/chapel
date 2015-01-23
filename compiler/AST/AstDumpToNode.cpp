@@ -999,12 +999,15 @@ bool AstDumpToNode::enterCondStmt(CondStmt* node)
   node->condExpr->accept(this);
   mOffset = mOffset - 2;
 
-  newline();
-  fprintf(mFP, "consequent:");
+  if (node->thenStmt)
+  {
+    newline();
+    fprintf(mFP, "consequent:");
 
-  mOffset = mOffset + 2;
-  node->thenStmt->accept(this);
-  mOffset = mOffset - 2;
+    mOffset = mOffset + 2;
+    node->thenStmt->accept(this);
+    mOffset = mOffset - 2;
+  }
 
   if (node->elseStmt)
   {
