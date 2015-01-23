@@ -731,14 +731,12 @@ protoIteratorClass(FnSymbol* fn) {
   TypeSymbol* cts = new TypeSymbol(astr("_ic_", className), ii->iclass);
   cts->addFlag(FLAG_ITERATOR_CLASS);
   add_root_type(ii->iclass);    // Add super : dtObject.
-  fn->defPoint->insertBefore(new DefExpr(cts));
 
   ii->irecord = new AggregateType(AGGREGATE_RECORD);
   TypeSymbol* rts = new TypeSymbol(astr("_ir_", className), ii->irecord);
   rts->addFlag(FLAG_ITERATOR_RECORD);
   if (fn->retTag == RET_REF)
     rts->addFlag(FLAG_REF_ITERATOR_CLASS);
-  fn->defPoint->insertBefore(new DefExpr(rts));
 
   ii->tag = it_iterator;
   ii->advance = protoIteratorMethod(ii, "advance", dtVoid);
@@ -755,8 +753,6 @@ protoIteratorClass(FnSymbol* fn) {
   ii->irecord->scalarPromotionType = fn->retType;
   fn->retType = ii->irecord;
   fn->retTag = RET_VALUE;
-
-  makeRefType(fn->retType);
 
   fn->iteratorInfo->zip1->addFlag(FLAG_RESOLVED);
   fn->iteratorInfo->zip2->addFlag(FLAG_RESOLVED);
@@ -779,8 +775,18 @@ protoIteratorClass(FnSymbol* fn) {
   ii->getIterator->insertAtTail(new CallExpr(PRIM_MOVE, ret, icAllocCall));
   ii->getIterator->insertAtTail(new CallExpr(PRIM_SETCID, ret));
   ii->getIterator->insertAtTail(new CallExpr(PRIM_RETURN, ret));
-  fn->defPoint->insertBefore(new DefExpr(ii->getIterator));
   ii->iclass->defaultInitializer = ii->getIterator;
+
+  // These end up in reverse order, so the getIterator function definition
+  // follows the iterator class type declaration.  This is important in dead
+  // block removal.
+  fn->defPoint->insertBefore(new DefExpr(ii->getIterator));
+  fn->defPoint->insertBefore(new DefExpr(cts));
+  fn->defPoint->insertBefore(new DefExpr(rts));
+
+  // Must operate on a type that is already in the tree.
+  makeRefType(fn->retType);
+
   normalize(ii->getIterator);
   resolveFns(ii->getIterator);  // No shortcuts.
 }

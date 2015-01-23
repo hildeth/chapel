@@ -111,18 +111,24 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
 
       // add the condition expr at the loop top
       } else if (WhileDoStmt* whileDoStmt = toWhileDoStmt(stmt)) {
-        SymExpr* condExpr = whileDoStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
-
-        append(condExpr, true);
+        INT_ASSERT(whileDoStmt->condExprGet());
+        // See note below related to the SymExpr fields of the ForLoop case.
 
       // wait to add the conditionExpr at the end of the block
       } else if (isDoWhileStmt(stmt) == true) {
 
-      } else if (ForLoop* forLoop = toForLoop(stmt)) {
-        append(forLoop->indexGet(),    true);
-        append(forLoop->iteratorGet(), true);
+      } else if (isForLoop(stmt)) {
+        // Don't add the mIndex nor mIterator fields, as these are references
+        // to expressions that are not actually evaluated in the code.
+        // It may be necessary to render the mIndex field as a callable
+        // expression (e.g. a primitive), so that we can correctly track
+        // read/write semantics.  The iterator record referred to by mIterator
+        // is (according to my current understanding) a container for the
+        // current state of the iterator.  I think that reads/writes to it can
+        // be ignored.  If not, then optimizations which depend on full
+        // visibility of those updates must be run after ForLoop constructs
+        // have been rewritten using more fundamental constructs (in
+        // lowerIterators()).
 
       // PARAM_LOOP
       } else {
@@ -144,11 +150,8 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
         }
 
       } else if (DoWhileStmt* doWhileStmt = toDoWhileStmt(stmt)) {
-        SymExpr* condExpr = doWhileStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
-
-        append(condExpr, true);
+        INT_ASSERT(doWhileStmt->condExprGet());
+        // See note above regarding SymExpr fields in ForLoop statements.
       }
 
       BasicBlock* loopBottom = basicBlock;

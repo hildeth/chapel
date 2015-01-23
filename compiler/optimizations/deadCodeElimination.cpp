@@ -458,7 +458,22 @@ static void deleteUnreachableBlocks(FnSymbol* fn, BasicBlockSet& reachable)
 
     // Remove all of its expressions.
     for_vector(Expr, expr, bb->exprs)
-      expr->remove();
+    {
+      DefExpr* def = toDefExpr(expr);
+      if (def && isFnSymbol(def->sym))
+      {
+        // Do nothing for now.
+        // We may need to move the function ahead of the enclosing block, but
+        // looking at flattenFunctions(), there are interactions with outer
+        // variables that get messed up if we simply rip the function out of
+        // its context and move it to module scope.
+
+        // The clause will be reached before flattenFunctions is run but not
+        // afterward.
+      }
+      else
+        expr->remove();
+    }
   }
 }
 
