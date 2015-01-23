@@ -381,8 +381,9 @@ static void handleRuntimeTypes();
 static void pruneResolvedTree();
 static void removeCompilerWarnings();
 static void removeUnusedFunctions();
-static void removeDeadBlocks();
-static bool removeDeadBlocks(FnSymbol* fn);
+//static void removeDeadBlocks();
+//static bool removeDeadBlocks(FnSymbol* fn);
+static void removeEmptyStmts();
 static void removeEmptyStmts(FnSymbol* fn);
 static void removeUnusedTypes();
 static void buildRuntimeTypeInitFns();
@@ -5546,6 +5547,7 @@ postFold(Expr* expr) {
               }
             }
           }
+
           if (isReferenceType(lhs->var->type) ||
               lhs->var->type->symbol->hasFlag(FLAG_REF_ITERATOR_CLASS) ||
               lhs->var->type->symbol->hasFlag(FLAG_ARRAY))
@@ -7358,7 +7360,8 @@ static void
 pruneResolvedTree() {
 
   removeUnusedFunctions();
-  removeDeadBlocks();
+  deadBlockElimination();
+  removeEmptyStmts();
   removeRandomPrimitives();
   replaceTypeArgsWithFormalTypeTemps();
   removeParamArgs();
@@ -7386,6 +7389,7 @@ static void removeUnusedFunctions() {
   }
 }
 
+#if 0
 static void removeDeadBlocks()
 {
   forv_Vec(FnSymbol, fn, gFnSymbols)
@@ -7433,6 +7437,20 @@ static bool removeDeadBlocks(FnSymbol* fn)
   return changed;
 }
 
+#else
+
+static void removeEmptyStmts()
+{
+  forv_Vec(FnSymbol, fn, gFnSymbols)
+  {
+    // Skip functions that are not in the tree.
+    if (!fn->defPoint || !fn->defPoint->parentSymbol)
+      continue;
+
+    removeEmptyStmts(fn);
+  }
+}
+
 static void removeEmptyStmts(FnSymbol* fn)
 {
   std::vector<Expr*> stmts;
@@ -7456,6 +7474,8 @@ static void removeEmptyStmts(FnSymbol* fn)
         call->remove();
   }
 }
+
+#endif
 
 static void removeCompilerWarnings() {
   // Warnings have now been issued, no need to keep the function around.
@@ -7819,7 +7839,6 @@ static void buildRuntimeTypeInitFns() {
     }
   }
 }
-
 
 // Build a function to return the runtime type by modifying
 // the original function.
