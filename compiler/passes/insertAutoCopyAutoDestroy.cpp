@@ -424,9 +424,14 @@ static bool isConsumed(SymExpr* se)
         // Assume that, generally speaking, a primitive does not consume its argument.
         return false;
 
+#if 0
+// Alas, no longer true.  See Note 1.
+// Instead, we treat assignment to the return value variable as if it were a
+// return.  This prevents undesirable aliasing.
        case PRIM_RETURN:
         // Returns act like destructors.
         return true;
+#endif
 
        case PRIM_MOVE:
        case PRIM_ASSIGN:
@@ -438,6 +443,9 @@ static bool isConsumed(SymExpr* se)
           {
             if (//lhse->var->type->symbol->hasFlag(FLAG_REF) ||
               isModuleSymbol(lhse->var->defPoint->parentSymbol))
+              return true;
+            // The return value variable acts like a return.  See Note 1.
+            if (lhse->var == toFnSymbol(se->parentSymbol)->getReturnSymbol())
               return true;
           }
         }
@@ -554,6 +562,12 @@ extractSymbols(FnSymbol* fn,
       continue;
     if (!at->isRecord())
       // Not a record.
+      continue;
+
+    // We skip the return value variable, because it can be assigned twice.
+    // That may cause it to join two alias cliques that are really separate.
+    // See Note 1.
+    if (sym == fn->getReturnSymbol())
       continue;
 
     symbolIndex.insert(SymbolIndexElement(sym, symbols.size()));
@@ -854,6 +868,11 @@ static void computeTransitions(FnSymbol* fn,
 static bool isRetVarInReturn(SymExpr* se)
 {
   if (CallExpr* call = toCallExpr(se->parentExpr))
+  {
+#if 0
+    // This is not used because return normalization pushes the point at which
+    // we consume a symbol to the point where it is assigned to the return
+    // value variable (see Note 1).
     if (call->isPrimitive(PRIM_RETURN))
       // We just assume that that call->get(1) == se.
       // What else could it be?
@@ -862,7 +881,21 @@ static bool isRetVarInReturn(SymExpr* se)
             fn->hasFlag(FLAG_AUTO_COPY_FN) ||
             fn->hasFlag(FLAG_INIT_COPY_FN))
         return true;
-
+#else
+    // Instead, we look for a transfer to the return value variable
+    if (call->isPrimitive(PRIM_MOVE) ||
+        call->isPrimitive(PRIM_ASSIGN))
+      if (call->get(2) == se)
+      {
+        if (FnSymbol* fn = toFnSymbol(call->parentSymbol))
+          if (fn->hasFlag(FLAG_CONSTRUCTOR) ||
+              fn->hasFlag(FLAG_AUTO_COPY_FN) ||
+              fn->hasFlag(FLAG_INIT_COPY_FN))
+            if (toSymExpr(call->get(1))->var == fn->getReturnSymbol())
+              return true;
+      }
+#endif
+  }
   return false;
 }
 
@@ -886,7 +919,8 @@ static bool isDestructorFormal(SymExpr* se)
 static bool isDestructorArg(SymExpr* se)
 {
   if (FnSymbol* parent = toFnSymbol(se->parentSymbol))
-    if (parent->hasFlag(FLAG_DESTRUCTOR))
+    if (parent->hasFlag(FLAG_DESTRUCTOR) ||
+        parent->hasFlag(FLAG_AUTO_DESTROY_FN))
       if (CallExpr* call = toCallExpr(se->parentExpr))
         if (FnSymbol* fn = call->isResolved())
           if (fn->hasFlag(FLAG_AUTO_DESTROY_FN))
@@ -1100,6 +1134,30 @@ static void insertAutoDestroy(FnSymbol* fn,
 }
 
 
+static void initInSets(FnSymbol* fn, FlowSet& IN,
+                       SymbolIndexMap& symbolIndex)
+{
+  // We seed the IN set of block 0 with args that consume their corresponding
+  // actual.  Eventually, we may do this in some more disciplined way (using
+  // intents or similar flags).  For now, we just look for the special cases we
+  // know about:
+  //  The meme argument of a constructor.
+
+  if (fn->hasFlag(FLAG_CONSTRUCTOR))
+  {
+    for_formals(formal, fn)
+    {
+      if (!strcmp(formal->name, "meme"))
+        if (symbolIndex.find(formal) != symbolIndex.end())
+        {
+          size_t j = symbolIndex.at(formal);
+          IN[0]->set(j);
+        }
+    }
+  }
+}
+
+
 // In backward flow, we adjust the out set so it is the intersection of the IN
 // sets of its successors.  If the block is a terminal block (a block with no
 // successors), however, we set its OUT to all zeroes.  This forces ownership to
@@ -1180,6 +1238,7 @@ static void insertAutoCopyAutoDestroy(FnSymbol* fn)
   // flows through the basic blocks.
   // The OUT sets are initially all ones.
   for(size_t i = 0; i < nbbs; ++i) OUT[i]->set();
+  initInSets(fn, IN, symbolIndex);
   BasicBlock::forwardFlowAnalysis(fn, GEN, KILL, IN, OUT, true);
 
 #if DEBUG_AMM
@@ -1242,3 +1301,12 @@ void insertAutoCopyAutoDestroy()
 // qualifier, but since operator[] in the C++98 STL is not a const member
 // function, we are prevented from doing so until we adopt the C++11 STL
 // uniformly.
+
+//########################################################################
+//# NOTES
+//#
+//# Note 1
+//#  Here is a place where early normalization of returns is disadvantageous.
+//# We have to match on the return value symbol rather than on a primitive.
+//# Matching on a primitive would be cheaper.
+//# 
