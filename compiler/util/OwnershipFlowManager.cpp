@@ -1261,6 +1261,7 @@ OwnershipFlowManager::insertAutoCopies()
 }
 
 
+#if 0
 // Find the end of the scope containing the given symbol and insert an
 // autoDestroy on it there.
 static void insertAutoDestroyAtScopeExit(Symbol* sym)
@@ -1346,7 +1347,90 @@ OwnershipFlowManager::insertAutoDestroys()
   // and then destroy each symbol at the end of its containing scope.
   insertAutoDestroy(&to_cons, symbols, symbolIndex, aliases);
 }
+#else
+static void
+insertAutoDestroyAfter(Expr* expr, Symbol* sym)
+{
+  FnSymbol* autoDestroy = toFnSymbol(autoDestroyMap.get(sym->type));
+  if (autoDestroy == NULL)
+    // This type does not have a destructor, so we don't have a add an
+    // autoDestroy call for it.
+    return;
 
+  // We use the declaration to set the line number for the inserted autodestroy.
+  DefExpr* def = toDefExpr(sym->defPoint);
+  if (def == NULL)
+  {
+    INT_FATAL("insertAutoDestroyAtScopeExit -- No def point for symbol %s", sym->name);
+    return;
+  }
+  SET_LINENO(def);
+
+  CallExpr* autoDestroyCall = new CallExpr(autoDestroy, sym);
+  expr->insertBeforeFlow(autoDestroyCall);
+  insertReferenceTemps(autoDestroyCall);
+}
+
+void
+OwnershipFlowManager::insertAutoDestroyAtBlockExit(Symbol* sym, BasicBlock* bb)
+{
+  Expr* expr = bb->exprs.back();
+  if (SymExpr* se = toSymExpr(expr))
+  {
+    // Special case: If this is the final expression in a condExpr then back
+    // up one more.  This will put the autoDestroy before the conditional is
+    // evaluated.  This could be tricky if the conditional expression iteself
+    // were tracked for ownership, but it is not: _condTest always converts
+    // it into a Boolean.
+    if (CondStmt* cs = toCondStmt(se->parentExpr))
+    {
+      std::vector<Expr*> exprs;
+      collectExprs(cs, exprs);
+      expr = exprs.back();
+    }
+    else
+      INT_FATAL("Unhandled case.");
+  }
+  insertAutoDestroyAfter(expr, sym);
+}
+
+void
+OwnershipFlowManager::insertAutoDestroys(BitVec& to_cons, BasicBlock* bb)
+{
+  for (size_t j = 0; j < nsyms; ++j)
+  {
+    if (to_cons.get(j))
+    {
+      Symbol* sym = symbols[j];
+
+      // Remove this symbol and all its aliases from the cons set.
+      SymbolVector* aliasList = aliases.at(sym);
+      Symbol* last = aliasList->operator[](aliasList->size() - 1);
+      resetAliasList(&to_cons, *aliasList, symbolIndex);
+
+      insertAutoDestroyAtBlockExit(last, bb);
+    }
+  }
+}
+
+void
+OwnershipFlowManager::insertAutoDestroys()
+{
+  // We need to re-run BB analysis, so that inserted autoCopy() calls are added
+  // to their respective basic blocks.
+  buildBasicBlocks();
+
+  // We need to insert an autodestroy call for each symbol that is owned
+  // (live) at the end of the block but goes out of scope there.
+  // That is the intersection of OUT and EXIT in each block.
+  for (size_t i = 0; i < nbbs; i++)
+  {
+    BitVec to_cons = *OUT[i] & *EXIT[i];
+    if (to_cons.any())
+      insertAutoDestroys(to_cons, (*basicBlocks)[i]);
+  }
+}
+#endif
 
 // TODO: Remove the computation of the EXIT set.  It is no longer needed,
 // because the only information we need to determine whether to insert an

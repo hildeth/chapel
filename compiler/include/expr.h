@@ -57,6 +57,7 @@ public:
   bool            isModuleDefinition();
 
   void            insertBefore(Expr* new_ast);
+  void            insertBeforeFlow(Expr* new_ast);
   void            insertAfter(Expr* new_ast);
   void            replace(Expr* new_ast);
 
@@ -318,7 +319,23 @@ inline static bool isFlowStmt(Expr* stmt)
       if (!strcmp(fn->name, "_downEndCount"))
         return true;
   }
+
+  // The SymExpr at the start of a conditional is treated as a flow statement.
+  if (SymExpr* se = toSymExpr(stmt))
+    if (isCondStmt(se->parentExpr))
+      return true;
+
   return false;
+}
+
+
+// Conditionally insert the given new_ast ahead of 'this' if this is a flow statement.
+inline void Expr::insertBeforeFlow(Expr* new_ast)
+{
+  if (isFlowStmt(this))
+    insertBefore(new_ast);
+  else
+    insertAfter(new_ast);
 }
 
 
