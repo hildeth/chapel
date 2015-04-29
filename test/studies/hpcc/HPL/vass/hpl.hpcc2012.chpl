@@ -3,7 +3,6 @@
 // and Timing routines
 //
 use Norm, Random, Time;
-use UtilMath;
 
 //
 // Use the user module for computing HPCC problem sizes
@@ -496,7 +495,7 @@ proc psReduce(blk, k) {
         maxRes.write(min(real));
         // Starts of all the blocks in the panel that are local to this node.
         const panelStarts = blk..n by blkSize*tl1 align 1+blkSize*lid1;
-          forall iStart in panelStarts {
+          forall iStart in panelStarts with (ref locResult) {
             const iRange = max(iStart, k)..min(iStart + blkSize - 1, n);
             var myResult: psRedResultT;
             myResult.init();

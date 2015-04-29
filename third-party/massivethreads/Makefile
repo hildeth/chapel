@@ -6,12 +6,17 @@ CHPL_MAKE_HOST_TARGET = --target
 include $(CHPL_MAKE_HOME)/make/Makefile.base
 
 #
-# set up the directories
+# Cray X* builds are cross-compilations.
 #
-MASSIVETHREADS_ABS_DIR = $(shell pwd)
-MASSIVETHREADS_INSTALL_DIR = $(MASSIVETHREADS_ABS_DIR)/$(MASSIVETHREADS_INSTALL_SUBDIR)
-MASSIVETHREADS_BUILD_DIR = $(MASSIVETHREADS_ABS_DIR)/$(MASSIVETHREADS_BUILD_SUBDIR)
-MASSIVETHREADS_DIR = $(MASSIVETHREADS_ABS_DIR)
+ifneq (, $(filter cray-x%,$(CHPL_MAKE_TARGET_PLATFORM)))
+CHPL_MASSIVETHREADS_CFG_OPTIONS += --host=x86_64-cle-linux-gnu
+endif
+
+CHPL_MASSIVETHREADS_CFG_OPTIONS += --enable-malloc-wrapper=no \
+                                   --enable-eco-mode=no \
+                                   --enable-bind-workers=no
+
+CHPL_MASSIVETHREADS_CFG_OPTIONS += $(CHPL_MASSIVETHREADS_MORE_CFG_OPTIONS)
 
 default: all
 
@@ -29,7 +34,7 @@ clobber: FORCE
 
 massivethreads-config: FORCE
 	mkdir -p $(MASSIVETHREADS_BUILD_DIR)
-	cd $(MASSIVETHREADS_BUILD_DIR) && $(MASSIVETHREADS_SUBDIR)/configure CC='$(CC)' CXX='$(CXX)' --prefix=$(MASSIVETHREADS_INSTALL_DIR) --enable-malloc-wrapper=no --enable-eco-mode=no --enable-bind-workers=no
+	cd $(MASSIVETHREADS_BUILD_DIR) && $(MASSIVETHREADS_SUBDIR)/configure CC='$(CC)' CXX='$(CXX)' --prefix=$(MASSIVETHREADS_INSTALL_DIR) $(CHPL_MASSIVETHREADS_CFG_OPTIONS)
 
 massivethreads-build: FORCE
 	cd $(MASSIVETHREADS_BUILD_DIR) && $(MAKE)

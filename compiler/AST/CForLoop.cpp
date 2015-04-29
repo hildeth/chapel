@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -33,34 +33,40 @@
 *                                                                           *
 ************************************* | ************************************/
 
+// A WhileDo loop may have a C_FOR_LOOP prim as the termination condition
 BlockStmt* CForLoop::buildCForLoop(CallExpr* call, BlockStmt* body)
 {
-  // Regular loop setup
-  CForLoop*    loop          = new CForLoop(call, body);
-  LabelSymbol* continueLabel = new LabelSymbol("_continueLabel");
-  LabelSymbol* breakLabel    = new LabelSymbol("_breakLabel");
+  BlockStmt* retval = buildChapelStmt();
 
-  Expr*        initClause    = call->get(1)->copy();
-  Expr*        testClause    = call->get(2)->copy();
-  Expr*        incrClause    = call->get(3)->copy();
+  if (call->isPrimitive(PRIM_BLOCK_C_FOR_LOOP) == true)
+  {
+    CForLoop*    loop          = new CForLoop(body);
 
-  BlockStmt*   initBlock     = new BlockStmt(initClause, BLOCK_C_FOR_LOOP);
-  BlockStmt*   testBlock     = new BlockStmt(testClause, BLOCK_C_FOR_LOOP);
-  BlockStmt*   incrBlock     = new BlockStmt(incrClause, BLOCK_C_FOR_LOOP);
+    Expr*        initClause    = call->get(1)->copy();
+    Expr*        testClause    = call->get(2)->copy();
+    Expr*        incrClause    = call->get(3)->copy();
 
-  BlockStmt*   retval        = buildChapelStmt();
+    BlockStmt*   initBlock     = new BlockStmt(initClause, BLOCK_C_FOR_LOOP);
+    BlockStmt*   testBlock     = new BlockStmt(testClause, BLOCK_C_FOR_LOOP);
+    BlockStmt*   incrBlock     = new BlockStmt(incrClause, BLOCK_C_FOR_LOOP);
 
-  call->get(1)->replace(initBlock);
-  call->get(2)->replace(testBlock);
-  call->get(3)->replace(incrBlock);
+    LabelSymbol* continueLabel = new LabelSymbol("_continueLabel");
+    LabelSymbol* breakLabel    = new LabelSymbol("_breakLabel");
 
-  loop->continueLabel = continueLabel;
-  loop->breakLabel    = breakLabel;
+    loop->mContinueLabel = continueLabel;
+    loop->mBreakLabel    = breakLabel;
 
-  loop->insertAtTail(new DefExpr(continueLabel));
+    loop->loopHeaderSet(initBlock, testBlock, incrBlock);
 
-  retval->insertAtTail(loop);
-  retval->insertAtTail(new DefExpr(breakLabel));
+    loop->insertAtTail(new DefExpr(continueLabel));
+
+    retval->insertAtTail(loop);
+    retval->insertAtTail(new DefExpr(breakLabel));
+  }
+  else
+  {
+    INT_ASSERT(false);
+  }
 
   return retval;
 }
@@ -70,16 +76,11 @@ CForLoop* CForLoop::buildWithBodyFrom(ForLoop* forLoop)
   SymbolMap map;
   CForLoop* retval = new CForLoop();
 
-  retval->astloc        = forLoop->astloc;
-  retval->blockTag      = forLoop->blockTag;
-  retval->breakLabel    = forLoop->breakLabel;
-  retval->continueLabel = forLoop->continueLabel;
-
-  if (forLoop->modUses   != 0)
-    retval->modUses = forLoop->modUses->copy(&map, true);
-
-  if (forLoop->byrefVars != 0)
-    retval->byrefVars = forLoop->byrefVars->copy(&map, true);
+  retval->astloc            = forLoop->astloc;
+  retval->blockTag          = forLoop->blockTag;
+  retval->mBreakLabel       = forLoop->breakLabelGet();
+  retval->mContinueLabel    = forLoop->continueLabelGet();
+  retval->mOrderIndependent = forLoop->isOrderIndependent();
 
   for_alist(expr, forLoop->body)
     retval->insertAtTail(expr->copy(&map, true));
@@ -93,17 +94,10 @@ CForLoop* CForLoop::buildWithBodyFrom(ForLoop* forLoop)
 // a BlockStmt that is presumed to be one of the header claiuses
 CForLoop* CForLoop::loopForClause(BlockStmt* clause)
 {
-  CForLoop* retval = 0;
+  CForLoop* retval = toCForLoop(clause->parentExpr);
 
   INT_ASSERT(clause->blockTag == BLOCK_C_FOR_LOOP);
-
-  if (CallExpr* call = toCallExpr(clause->parentExpr)) {
-    if (call->isPrimitive(PRIM_BLOCK_C_FOR_LOOP)) {
-      retval = toCForLoop(call->parentExpr);
-
-      INT_ASSERT(retval != 0);
-    }
-  }
+  INT_ASSERT(retval);
 
   return retval;
 }
@@ -114,22 +108,18 @@ CForLoop* CForLoop::loopForClause(BlockStmt* clause)
 *                                                                           *
 ************************************* | ************************************/
 
-CForLoop::CForLoop()
+CForLoop::CForLoop() : LoopStmt(0)
 {
-
+  mInitClause = 0;
+  mTestClause = 0;
+  mIncrClause = 0;
 }
 
-CForLoop::CForLoop(CallExpr*  cforInfo,
-                   BlockStmt* initBody) : BlockStmt(initBody)
+CForLoop::CForLoop(BlockStmt* initBody) : LoopStmt(initBody)
 {
-  BlockStmt::blockInfoSet(cforInfo);
-}
-
-CForLoop::CForLoop(BlockStmt* initBody,
-                   VarSymbol* index,
-                   VarSymbol* iterator) : BlockStmt(initBody)
-{
-  BlockStmt::blockInfoSet(new CallExpr(PRIM_BLOCK_FOR_LOOP, index, iterator));
+  mInitClause = 0;
+  mTestClause = 0;
+  mIncrClause = 0;
 }
 
 CForLoop::~CForLoop()
@@ -141,23 +131,22 @@ CForLoop* CForLoop::copy(SymbolMap* mapRef, bool internal)
 {
   SymbolMap  localMap;
   SymbolMap* map       = (mapRef != 0) ? mapRef : &localMap;
-  CallExpr*  blockInfo = BlockStmt::blockInfoGet();
   CForLoop*  retval    = new CForLoop();
 
-  retval->astloc        = astloc;
-  retval->blockTag      = blockTag;
+  retval->astloc            = astloc;
+  retval->blockTag          = blockTag;
 
-  retval->breakLabel    = breakLabel;
-  retval->continueLabel = continueLabel;
+  retval->mBreakLabel       = mBreakLabel;
+  retval->mContinueLabel    = mContinueLabel;
+  retval->mOrderIndependent = mOrderIndependent;
 
-  if (blockInfo != 0)
-    retval->BlockStmt::blockInfoSet(blockInfo->copy(map, true));
+  if (initBlockGet() != 0 && testBlockGet() != 0 && incrBlockGet() != 0)
+    retval->loopHeaderSet(initBlockGet()->copy(map, true),
+                          testBlockGet()->copy(map, true),
+                          incrBlockGet()->copy(map, true));
 
-  if (modUses   != 0)
-    retval->modUses = modUses->copy(map, true);
-
-  if (byrefVars != 0)
-    retval->byrefVars = byrefVars->copy(map, true);
+  else if (initBlockGet() != 0 && testBlockGet() != 0 && incrBlockGet() != 0)
+    INT_ASSERT(false);
 
   for_alist(expr, body)
     retval->insertAtTail(expr->copy(map, true));
@@ -166,11 +155,6 @@ CForLoop* CForLoop::copy(SymbolMap* mapRef, bool internal)
     update_symbols(retval, map);
 
   return retval;
-}
-
-bool CForLoop::isLoop() const
-{
-  return true;
 }
 
 bool CForLoop::isCForLoop() const
@@ -186,48 +170,50 @@ void CForLoop::loopHeaderSet(BlockStmt* initBlock,
   testBlock->blockTag = BLOCK_C_FOR_LOOP;
   incrBlock->blockTag = BLOCK_C_FOR_LOOP;
 
-  BlockStmt::blockInfoSet(new CallExpr(primitives[PRIM_BLOCK_C_FOR_LOOP],
-                                       initBlock,
-                                       testBlock,
-                                       incrBlock));
+  mInitClause = initBlock;
+  mTestClause = testBlock;
+  mIncrClause = incrBlock;
 }
 
-
-// NOAKES 2014/11/26   Transitional
-CallExpr* CForLoop::cforInfoGet() const
+BlockStmt* CForLoop::initBlockGet() const
 {
- return BlockStmt::blockInfoGet();
+  return mInitClause;
 }
 
-CallExpr* CForLoop::cforInfoSet(CallExpr* info)
+BlockStmt* CForLoop::testBlockGet() const
 {
-  return BlockStmt::blockInfoSet(info);
+  return mTestClause;
+}
+
+BlockStmt* CForLoop::incrBlockGet() const
+{
+  return mIncrClause;
 }
 
 CallExpr* CForLoop::blockInfoGet() const
 {
   printf("Migration: CForLoop  %12d Unexpected call to blockInfoGet()\n", id);
 
-  return BlockStmt::blockInfoGet();
+  return 0;
 }
 
 CallExpr* CForLoop::blockInfoSet(CallExpr* expr)
 {
   printf("Migration: CForLoop  %12d Unexpected call to blockInfoSet()\n", id);
 
-  return BlockStmt::blockInfoSet(expr);
+  return 0;
 }
 
 bool CForLoop::deadBlockCleanup()
 {
   bool retval = false;
 
-  if (CallExpr* loop = BlockStmt::blockInfoGet()) {
-    if (BlockStmt* test = toBlockStmt(loop->get(2))) {
-      if (test->body.length == 0) {
-        remove();
-        retval = true;
-      }
+  if (BlockStmt* test = testBlockGet())
+  {
+    if (test->body.length == 0)
+    {
+      remove();
+      retval = true;
     }
   }
 
@@ -238,25 +224,31 @@ void CForLoop::verify()
 {
   BlockStmt::verify();
 
-  if (BlockStmt::blockInfoGet() == 0)
+  if (BlockStmt::blockInfoGet() != 0)
     INT_FATAL(this, "CForLoop::verify. blockInfo is NULL");
 
-  if (BlockStmt::blockInfoGet()->isPrimitive(PRIM_BLOCK_C_FOR_LOOP) == false)
-    INT_FATAL(this, "CForLoop::verify. blockInfo type is not PRIM_BLOCK_C_FOR_LOOP");
+  if (initBlockGet()            == 0)
+    INT_FATAL(this, "CForLoop::verify. initBlock is NULL");
 
-  if (toBlockStmt(BlockStmt::blockInfoGet()->get(1))->blockTag != BLOCK_C_FOR_LOOP)
+  if (testBlockGet()            == 0)
+    INT_FATAL(this, "CForLoop::verify. testBlock is NULL");
+
+  if (incrBlockGet()            == 0)
+    INT_FATAL(this, "CForLoop::verify. incrBlock is NULL");
+
+  if (initBlockGet()->blockTag  != BLOCK_C_FOR_LOOP)
     INT_FATAL(this, "CForLoop::verify. initBlock is not BLOCK_C_FOR_LOOP");
 
-  if (toBlockStmt(BlockStmt::blockInfoGet()->get(2))->blockTag != BLOCK_C_FOR_LOOP)
+  if (testBlockGet()->blockTag  != BLOCK_C_FOR_LOOP)
     INT_FATAL(this, "CForLoop::verify. testBlock is not BLOCK_C_FOR_LOOP");
 
-  if (toBlockStmt(BlockStmt::blockInfoGet()->get(3))->blockTag != BLOCK_C_FOR_LOOP)
+  if (incrBlockGet()->blockTag  != BLOCK_C_FOR_LOOP)
     INT_FATAL(this, "CForLoop::verify. incrBlock is not BLOCK_C_FOR_LOOP");
 
-  if (modUses   != 0)
+  if (modUses                   != 0)
     INT_FATAL(this, "CForLoop::verify. modUses   is not NULL");
 
-  if (byrefVars != 0)
+  if (byrefVars                 != 0)
     INT_FATAL(this, "CForLoop::verify. byrefVars is not NULL");
 }
 
@@ -270,13 +262,12 @@ GenRet CForLoop::codegen()
 
   if (outfile)
   {
-    CallExpr*   blockInfo = BlockStmt::blockInfoGet();
-    BlockStmt*  initBlock = toBlockStmt(blockInfo->get(1));
+    BlockStmt*  initBlock = initBlockGet();
 
     // These copy calls are needed or else values get code generated twice.
     std::string init      = codegenCForLoopHeader(initBlock->copy());
 
-    BlockStmt*  testBlock = toBlockStmt(blockInfo->get(2));
+    BlockStmt*  testBlock = testBlockGet();
     std::string test      = codegenCForLoopHeader(testBlock->copy());
 
     // wrap the test with paren. Could probably check if it already has
@@ -284,9 +275,11 @@ GenRet CForLoop::codegen()
     if (test != "")
       test = "(" + test + ")";
 
-    BlockStmt*  incrBlock = toBlockStmt(blockInfo->get(3));
+    BlockStmt*  incrBlock = incrBlockGet();
     std::string incr      = codegenCForLoopHeader(incrBlock->copy());
     std::string hdr       = "for (" + init + "; " + test + "; " + incr + ") ";
+
+    codegenOrderIndependence();
 
     info->cStatements.push_back(hdr);
 
@@ -316,9 +309,9 @@ GenRet CForLoop::codegen()
     llvm::BasicBlock* blockStmtBody = NULL;
     llvm::BasicBlock* blockStmtEnd  = NULL;
 
-    BlockStmt*        initBlock     = toBlockStmt(BlockStmt::blockInfoGet()->get(1));
-    BlockStmt*        testBlock     = toBlockStmt(BlockStmt::blockInfoGet()->get(2));
-    BlockStmt*        incrBlock     = toBlockStmt(BlockStmt::blockInfoGet()->get(3));
+    BlockStmt*        initBlock     = initBlockGet();
+    BlockStmt*        testBlock     = testBlockGet();
+    BlockStmt*        incrBlock     = incrBlockGet();
 
     assert(initBlock && testBlock && incrBlock);
 
@@ -508,34 +501,45 @@ GenRet CForLoop::codegenCForLoopCondition(BlockStmt* block)
 #endif
 }
 
-void CForLoop::accept(AstVisitor* visitor) {
-  if (visitor->enterCForLoop(this) == true) {
-    CallExpr* blockInfo = BlockStmt::blockInfoGet();
-
+void CForLoop::accept(AstVisitor* visitor)
+{
+  if (visitor->enterCForLoop(this) == true)
+  {
     for_alist(next_ast, body)
       next_ast->accept(visitor);
 
-    if (blockInfo)
-      blockInfo->accept(visitor);
+    if (initBlockGet() != 0)
+      initBlockGet()->accept(visitor);
 
-    if (modUses)
-      modUses->accept(visitor);
+    if (testBlockGet() != 0)
+      testBlockGet()->accept(visitor);
 
-    if (byrefVars)
-      byrefVars->accept(visitor);
+    if (incrBlockGet() != 0)
+      incrBlockGet()->accept(visitor);
 
     visitor->exitCForLoop(this);
   }
 }
 
-Expr* CForLoop::getFirstExpr() {
+Expr* CForLoop::getFirstExpr()
+{
   Expr* retval = 0;
 
-  if (BlockStmt::blockInfoGet() != 0)
-    retval = BlockStmt::blockInfoGet()->getFirstExpr();
+  if (mInitClause != 0)
+  {
+    INT_ASSERT(mTestClause != 0);
+    INT_ASSERT(mIncrClause != 0);
 
-  else if (body.head      != 0)
+    retval = mInitClause->getFirstExpr();
+  }
+
+  else if (body.head != 0)
+  {
+    INT_ASSERT(mTestClause == 0);
+    INT_ASSERT(mIncrClause == 0);
+
     retval = body.head->getFirstExpr();
+  }
 
   else
     retval = this;
@@ -543,11 +547,26 @@ Expr* CForLoop::getFirstExpr() {
   return retval;
 }
 
-Expr* CForLoop::getNextExpr(Expr* expr) {
-  Expr* retval = NULL;
+Expr* CForLoop::getNextExpr(Expr* expr)
+{
+  Expr* retval = 0;
 
-  if (expr == BlockStmt::blockInfoGet() && body.head != NULL)
+  if (expr == mInitClause)
+  {
+    INT_ASSERT(mTestClause != 0);
+    INT_ASSERT(mIncrClause != 0);
+
+    retval = mTestClause->getFirstExpr();
+  }
+
+  else if (expr == mTestClause)
+    retval = mIncrClause->getFirstExpr();
+
+  else if (expr == mIncrClause && body.head != NULL)
     retval = body.head->getFirstExpr();
+
+  else
+    retval = this;
 
   return retval;
 }

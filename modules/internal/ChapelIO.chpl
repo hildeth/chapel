@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -19,7 +19,6 @@
 
 // ChapelIO.chpl
 //
-pragma "no use ChapelStandard"
 module ChapelIO {
   use ChapelBase; // for uint().
   use SysBasic;
@@ -52,7 +51,7 @@ module ChapelIO {
       if _isIoPrimitiveTypeOrNewline(t) {
         writePrimitive(x);
       } else {
-        if isClassType(t) {
+        if isClassType(t) || chpl_isDdata(t) {
           // FUTURE -- write the class name/ID?
   
           if x == nil {
@@ -479,23 +478,6 @@ module ChapelIO {
     this.readwrite(ionl);
   }
   
-  
-  
-  proc assert(test: bool) {
-    if !test then
-      __primitive("chpl_error", "assert failed");
-  }
-  
-  extern proc chpl_exit_any(status:int);
-  
-  proc assert(test: bool, args ...?numArgs) {
-    if !test {
-      var tmpstring: c_string;
-      tmpstring.write((...args));
-      __primitive("chpl_error", "assert failed - " + tmpstring);
-    }
-  }
-  
   proc halt() {
     __primitive("chpl_error", "halt reached");
   }
@@ -531,7 +513,7 @@ module ChapelIO {
   
   proc _ddata.writeThis(f: Writer) {
     compilerWarning("printing _ddata class");
-    write("<_ddata class cannot be printed>");
+    f.write("<_ddata class cannot be printed>");
   }
 
   proc chpl_taskID_t.writeThis(f: Writer) {
@@ -659,9 +641,7 @@ module ChapelIO {
     chpl__testParOn = false;
   }
   
-  inline proc chpl__testPar(args...) where chpl__testParFlag == false { }
-  
-  proc chpl__testPar(args...) where chpl__testParFlag == true {
+  proc chpl__testPar(args...) {
     if chpl__testParFlag && chpl__testParOn {
       const file : c_string = __primitive("_get_user_file");
       const line = __primitive("_get_user_line");

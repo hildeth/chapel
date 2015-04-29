@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -31,12 +31,14 @@
 
 #include "sys_basic.h"
 
-#ifndef SIMPLE_TEST
+#ifndef CHPL_RT_UNIT_TEST
 #include "chplrt.h"
 #endif
 
 #include "qio.h"
 #include "qbuffer.h"
+
+#include "error.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -520,7 +522,7 @@ qio_hint_t choose_io_method(qio_file_t* file, qio_hint_t hints, qio_hint_t defau
       method = QIO_METHOD_PREADPWRITE;
 
     // Read and write
-    if((fdflags & QIO_FDFLAG_WRITEABLE)  && 
+    if((fdflags & QIO_FDFLAG_READABLE)   &&
         (fdflags & QIO_FDFLAG_WRITEABLE) &&
         file->fsfns->preadv && file->fsfns->pwritev)
       method = QIO_METHOD_PREADPWRITE;
@@ -681,6 +683,7 @@ qioerr qio_mmap_initial(qio_file_t* file)
 
     if( file->fdflags & QIO_FDFLAG_WRITEABLE ) prot |= PROT_WRITE;
 
+    // This check is (only) important for 32-bit systems.
     if( len > SSIZE_MAX ) return QIO_ENOMEM;
 
     // mmap the initial length of the file.
@@ -724,6 +727,8 @@ qioerr qio_file_init(qio_file_t** file_out, FILE* fp, fd_t fd, qio_hint_t iohint
     fd = fileno(fp);
     if( fd == -1 ) return qio_mkerror_errno();
   }
+
+  if( fd < 0 ) QIO_RETURN_CONSTANT_ERROR(EINVAL, "invalid file descriptor");
 
   err = qio_int_to_err(sys_fstat(fd, &stats));
   if( err ) return err;
@@ -1509,7 +1514,9 @@ qioerr _qio_channel_makebuffer_unlocked(qio_channel_t* ch)
   // adding to the qbuffer the file data.
   // We do not check cached_start since we might have moved
   // the mark_stack along with changing cached_start
-  assert( ch->cached_end == expect_end );
+  if ( ch->cached_end != expect_end ) {
+    chpl_internal_error("_qio_channel_makebuffer_unlocked() failed");
+  }
 
   ch->mark_stack[0] = qbuffer_start_offset(&ch->buf);
 
@@ -2164,6 +2171,7 @@ qioerr _buffered_get_mmap(qio_channel_t* ch, int64_t amt_in, int writing)
     prot = PROT_READ;
     if( ch->flags & QIO_FDFLAG_WRITEABLE ) prot |= PROT_WRITE;
 
+    // This check is (only) important for 32-bit systems.
     if( len > SSIZE_MAX ) QIO_RETURN_CONSTANT_ERROR(EOVERFLOW, "overflow in mmap");
 
     err = qio_int_to_err(sys_mmap(NULL, len, prot, MAP_SHARED, ch->file->fd, map_start, &data));
@@ -3578,6 +3586,9 @@ void _qio_channel_write_bits_cached_realign(qio_channel_t* restrict ch, uint64_t
   tmp_live = ch->bit_buffer_bits;
   tmp_bits = ch->bit_buffer;
 
+  // ch->bit_buffer_bits should never exceed the sizeof the bitbuffer
+  assert(0 <= tmp_live && tmp_live <= (int) (8*sizeof(qio_bitbuffer_t)));
+
   // We've got > 64 bits to write.
   part_one = 8*sizeof(qio_bitbuffer_t) - tmp_live;
   part_two = nbits - part_one;
@@ -3652,6 +3663,9 @@ qioerr _qio_channel_write_bits_slow(qio_channel_t* restrict ch, uint64_t v, int8
   tmp_live = ch->bit_buffer_bits;
   tmp_bits = ch->bit_buffer;
   if( tmp_live == 0 ) tmp_bits = 0;
+
+  // ch->bit_buffer_bits should never exceed the sizeof the bitbuffer
+  assert(0 <= tmp_live && tmp_live <= (int) (8*sizeof(qio_bitbuffer_t)));
 
   //printf("In write bits slow\n");
 

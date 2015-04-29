@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2015 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -22,8 +22,18 @@
 #
 # Tools
 #
+
+ifeq ($(CHPL_MAKE_COMPILER), clang-included)
+# handle using the included clang compiler
+CLANG_SYSROOT_ARGS=$(shell cat $(LLVM_CLANG_ARGUMENTS_FILE))
+CXX = $(LLVM_BIN_DIR)/clang++ $(CLANG_SYSROOT_ARGS)
+CC = $(LLVM_BIN_DIR)/clang $(CLANG_SYSROOT_ARGS)
+else
 CXX = clang++
 CC = clang
+endif
+
+
 
 RANLIB = ranlib
 

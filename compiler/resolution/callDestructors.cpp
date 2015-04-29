@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -72,7 +72,7 @@ static void cullAutoDestroyFlags()
         buildDefUseMaps(fn, defMap, useMap);
 
         std::vector<DefExpr*> defs;
-        collectDefExprsSTL(fn, defs);
+        collectDefExprs(fn, defs);
 
         for_vector(DefExpr, def, defs)
         {
@@ -121,7 +121,7 @@ static void cullExplicitAutoDestroyFlags()
     buildDefUseMaps(fn, defMap, useMap);
 
     std::vector<DefExpr*> defs;
-    collectDefExprsSTL(fn, defs);
+    collectDefExprs(fn, defs);
 
     Symbol* retVar = fn->getReturnSymbol();
 
@@ -238,7 +238,7 @@ static bool stmtDefinesAnAutoDestroyedVariable(Expr* stmt) {
         // flag, presumably before the type was known, that should not in
         // fact be auto-destroyed.  Don't gum things up by collecting them.
         if (autoDestroyMap.get(var->type) != 0) {
-          if (var->hasFlag(FLAG_TYPE_VARIABLE) == false) {
+          if (var->isType() == false) {
             retval = true;
           }
         }
@@ -267,11 +267,11 @@ static void updateJumpsFromBlockStmt(Expr*            stmt,
       isSymExpr(stmt)  == false &&
       isCallExpr(stmt) == false &&
       isGotoStmt(stmt) == false) {
-    Vec<GotoStmt*> gotoStmts;
+    std::vector<GotoStmt*> gotoStmts;
 
     collectGotoStmts(stmt, gotoStmts);
 
-    forv_Vec(GotoStmt, gotoStmt, gotoStmts) {
+    for_vector(GotoStmt, gotoStmt, gotoStmts) {
       if (gotoExitsBlock(gotoStmt, block)) {
         forv_Vec(VarSymbol, var, vars) {
           if (FnSymbol* autoDestroyFn = autoDestroyMap.get(var->type)) {
@@ -438,7 +438,7 @@ createClonedFnWithRetArg(FnSymbol* fn, FnSymbol* useFn)
   newFn->retType = dtVoid;
   fn->defPoint->insertBefore(new DefExpr(newFn));
 
-  Vec<SymExpr*> symExprs;
+  std::vector<SymExpr*> symExprs;
   collectSymExprs(newFn, symExprs);
 
   // In the body of the function, replace references to the original
@@ -446,7 +446,7 @@ createClonedFnWithRetArg(FnSymbol* fn, FnSymbol* useFn)
   // deref temp is inserted if needed.  The result is fed through a
   // call to the useFn -- effectively sucking the use function call
   // inside the clone function.
-  forv_Vec(SymExpr, se, symExprs) {
+  for_vector(SymExpr, se, symExprs) {
     if (se->var == ret) {
       CallExpr* move = toCallExpr(se->parentExpr);
       if (move && move->isPrimitive(PRIM_MOVE) && move->get(1) == se) {
@@ -623,9 +623,9 @@ changeRetToArgAndClone(CallExpr* move, Symbol* lhs,
     use = *useMap.get(lhs);
   } else {
     for (Expr* stmt = move->next; stmt; stmt = stmt->next) {
-      Vec<SymExpr*> symExprs;
+      std::vector<SymExpr*> symExprs;
       collectSymExprs(stmt, symExprs);
-      forv_Vec(SymExpr, se, symExprs) {
+      for_vector(SymExpr, se, symExprs) {
         if (se->var == lhs) {
           use.add(se);
         }
@@ -760,6 +760,10 @@ fixupDestructors() {
 
 
 static void insertGlobalAutoDestroyCalls() {
+  // --ipe does not build chpl_gen_main
+  if (chpl_gen_main == NULL)
+    return;
+
   const char* name = "chpl__autoDestroyGlobals";
   SET_LINENO(baseModule);
   FnSymbol* fn = new FnSymbol(name);
@@ -770,7 +774,7 @@ static void insertGlobalAutoDestroyCalls() {
     if (isModuleSymbol(def->parentSymbol))
       if (def->parentSymbol != rootModule)
         if (VarSymbol* var = toVarSymbol(def->sym))
-          if (!var->isParameter() && !var->hasFlag(FLAG_TYPE_VARIABLE))
+          if (!var->isParameter() && !var->isType())
             if (!var->hasFlag(FLAG_NO_AUTO_DESTROY))
               if (FnSymbol* autoDestroy = autoDestroyMap.get(var->type)) {
                 SET_LINENO(var);
@@ -816,6 +820,21 @@ static void insertAutoCopyTemps()
           }
         }
       }
+
+      // 2015/01/21 hilde: Workaround for incomplete implementation of
+      // SymExpr::remove() in the context of a ForLoop (as its mIndex field).
+      // This operation is required by the early operation of
+      // deadBlockElimination().
+
+      // In that case, the DefExpr for the symbol should no longer exist, so we
+      // would never reach here.  Given that it is never defined and we *do*
+      // reach here, there is no harm in not creating the autoCopy temp.  This
+      // code will probably all be deprecated when the new AMM story comes
+      // online anyway, so it would be a waste of time trying to "do things
+      // right" in this routine.
+      if (! move)
+        continue;
+
       INT_ASSERT(move);
       SET_LINENO(move);
       Symbol* tmp = newTemp("_autoCopy_tmp_", sym->type);

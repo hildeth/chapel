@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -25,9 +25,12 @@
 #define _BSD_SOURCE
 #endif
 
-#ifndef _DARWIN_C_SOURCE
 // to get NI_MAXHOST or NI_MAXSERV
+#ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
+#endif
+#ifndef _NETBSD_SOURCE
+#define _NETBSD_SOURCE
 #endif
 
 // AIX needs _ALL_SOURCE
@@ -49,6 +52,12 @@
 #define _POSIX_C_SOURCE 200112L
 #endif
 
+#ifndef _DEFAULT_SOURCE
+// Quiets warnings about _BSD_SOURCE being deprecated in glbic >= 2.20
+// This define enables everything _BSD_SOURCE does (and more) with glibc >= 2.19
+#define _DEFAULT_SOURCE
+#endif
+
 //
 // The following breaks #include of "glob.h" with the Cray CCE
 // compiler and also complicates things for the #inclusion of dirent.h
@@ -59,12 +68,6 @@
 //#ifndef _FILE_OFFSET_BITS
 //#define _FILE_OFFSET_BITS 64
 //#endif
-
-#ifdef __GNUC__
-#define ___always_inline inline __attribute__((__always_inline__))
-#else
-#define ___always_inline inline
-#endif
 
 // Ask a C++ compiler if it would please include e.g. INT64_MAX
 #define __STDC_CONSTANT_MACROS

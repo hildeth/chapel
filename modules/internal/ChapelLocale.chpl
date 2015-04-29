@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,10 +19,18 @@
 
 // ChapelLocale.chpl
 //
-pragma "no use ChapelStandard"
 module ChapelLocale {
 
   use LocaleModel;
+
+  //
+  // Node and sublocale types and special sublocale values.
+  //
+  type chpl_nodeID_t = int(32);
+  type chpl_sublocID_t = int(32);
+
+  extern const c_sublocid_none: chpl_sublocID_t;
+  extern const c_sublocid_any: chpl_sublocID_t;
 
   //
   // An abstract class. Specifies the required locale interface.
@@ -31,7 +39,7 @@ module ChapelLocale {
   class locale {
     //- Constructor
     proc locale() { }
-  
+
     //------------------------------------------------------------------------{
     //- Fields and accessors defined for all locale types (not overridable)
     //-
@@ -97,7 +105,6 @@ module ChapelLocale {
 
     proc chpl_localeid() : chpl_localeID_t {
       _throwPVFCError();
-      extern const c_sublocid_none: chpl_sublocID_t;
       return chpl_buildLocaleID(-1:chpl_nodeID_t, c_sublocid_none);
     }
 
@@ -201,7 +208,7 @@ module ChapelLocale {
     // initialize the LocaleModel.  The calling loop body cannot
     // contain any non-local code, since the rootLocale is not yet
     // initialized.
-    iter initOnLocales() {
+    iter chpl_initOnLocales() {
       if numLocales > 1 then
         halt("The locales must be initialized in parallel");
       for locIdx in (origRootLocale:RootLocale).getDefaultLocaleSpace() {
@@ -214,12 +221,11 @@ module ChapelLocale {
     // opportunity to initialize any global private variables we
     // either need (e.g., defaultDist) or can do at this point in
     // initialization (e.g., rootLocale).
-    iter initOnLocales(param tag: iterKind)
-      where tag==iterKind.leader {
+    iter chpl_initOnLocales(param tag: iterKind)
+      where tag==iterKind.standalone {
       // Simple locales barrier, see implementation below for notes
       var b: localesBarrier;
       var flags: [1..#numLocales-1] localesSignal;
-      extern const c_sublocid_any: chpl_sublocID_t;
       coforall locIdx in 0..#numLocales /*ref(b)*/ {
         on __primitive("chpl_on_locale_num",
                        chpl_buildLocaleID(locIdx:chpl_nodeID_t,
@@ -230,11 +236,6 @@ module ChapelLocale {
           chpl_rootLocaleInitPrivate(locIdx);
         }
       }
-    }
-
-    iter initOnLocales(param tag: iterKind, followThis)
-      where tag==iterKind.follower {
-      yield followThis;
     }
   }
 
@@ -297,7 +298,7 @@ module ChapelLocale {
   // the rootLocale.  It sets up the origRootLocale and also includes
   // set up of the each locale's LocaleModel via RootLocale:init().
   //
-  // The init() function must use the initOnLocales() iterator above
+  // The init() function must use the chpl_initOnLocales() iterator above
   // to iterate in parallel over the locales to set up the LocaleModel
   // object.
   proc chpl_init_rootLocale() {
@@ -352,9 +353,18 @@ module ChapelLocale {
 
   extern proc chpl_task_getRequestedSubloc(): chpl_sublocID_t;
 
+  pragma "insert line file info"
+  export
+  proc chpl_getLocaleID(ref localeID: chpl_localeID_t) {
+    localeID = here_id;
+  }
+
   // Return the locale ID of the current locale
   inline proc here_id {
-    return chpl_buildLocaleID(chpl_nodeID,chpl_task_getRequestedSubloc());
+     if localeModelHasSublocales then
+      return chpl_rt_buildLocaleID(chpl_nodeID, chpl_task_getRequestedSubloc());
+    else
+      return chpl_rt_buildLocaleID(chpl_nodeID, c_sublocid_any);
   }
   // Return the current locale
   inline proc here {

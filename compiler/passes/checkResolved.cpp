@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,12 +20,12 @@
 // checkResolved.cpp
 
 #include "passes.h"
-#include "driver.h"
 
-#include "stmt.h"
-#include "expr.h"
-#include "stlUtil.h"
 #include "astutil.h"
+#include "driver.h"
+#include "expr.h"
+#include "stmt.h"
+#include "stlUtil.h"
 
 #include <set>
 
@@ -39,6 +39,7 @@ static void checkConstLoops();
 static int isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs);
 static void checkReturnPaths(FnSymbol* fn);
 static void checkNoRecordDeletes();
+static void checkExternProcs();
 
 
 static void
@@ -55,7 +56,8 @@ checkResolved() {
   forv_Vec(FnSymbol, fn, gFnSymbols) {
     checkReturnPaths(fn);
     if (fn->retType->symbol->hasFlag(FLAG_ITERATOR_RECORD) &&
-        !fn->hasFlag(FLAG_ITERATOR_FN) &&
+        !fn->isIterator() &&
+        fn->retType->defaultInitializer &&
         fn->retType->defaultInitializer->defPoint->parentSymbol == fn)
       USR_FATAL_CONT(fn, "functions cannot return nested iterators or loop expressions");
     if (fn->hasFlag(FLAG_ASSIGNOP) && fn->retType != dtVoid)
@@ -77,13 +79,14 @@ checkResolved() {
   }
   checkNoRecordDeletes();
   checkConstLoops();
+  checkExternProcs();
 }
 
 
 // Returns the smallest number of definitions of ret on any path through the
 // given expression.
 static int
-isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs) 
+isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
 {
   if (!expr)
     return 0;
@@ -94,7 +97,7 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
   if (isSymExpr(expr))
     return 0;
 
-  if (CallExpr* call = toCallExpr(expr)) 
+  if (CallExpr* call = toCallExpr(expr))
   {
     // Maybe add a "no return" pragma and use that instead.
     if (call->isNamed("halt"))
@@ -151,6 +154,7 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
         }
       }
     }
+
     return 0;
   }
 
@@ -166,9 +170,10 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
   if (BlockStmt* block = toBlockStmt(expr))
   {
     // NOAKES 2014/11/25 Transitional.  Ensure we don't call blockInfoGet()
-    if (block->isWhileDoStmt() == true ||
-        block->isForLoop()     == true ||
-        block->isCForLoop()    == true)
+    if (block->isWhileDoStmt()  == true ||
+        block->isForLoop()      == true ||
+        block->isCForLoop()     == true ||
+        block->isParamForLoop() == true)
     {
       return 0;
     }
@@ -202,7 +207,7 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
 static void
 checkReturnPaths(FnSymbol* fn) {
   // Check to see if the function returns a value.
-  if (fn->hasFlag(FLAG_ITERATOR_FN) ||
+  if (fn->isIterator() ||
       !strcmp(fn->name, "=") || // TODO: Remove this to enforce new signature.
       !strcmp(fn->name, "chpl__buildArrayRuntimeType") ||
       fn->retType == dtVoid ||
@@ -260,7 +265,7 @@ checkNoRecordDeletes()
   forv_Vec(CallExpr, call, gCallExprs)
   {
     FnSymbol* fn = call->isResolved();
-  
+
     // Note that fn can (legally) be null if the call is primitive.
     if (fn && fn->hasFlag(FLAG_DESTRUCTOR)) {
       // Statements of the form 'delete x' (PRIM_DELETE) are replaced
@@ -270,6 +275,32 @@ checkNoRecordDeletes()
       //  is a record.
       if (isRecord(call->get(1)->typeInfo()->getValType()))
         USR_FATAL_CONT(call, "delete not allowed on records");
+    }
+  }
+}
+
+
+static void checkExternProcs() {
+  forv_Vec(FnSymbol, fn, gFnSymbols) {
+    if (!fn->hasFlag(FLAG_EXTERN))
+      continue;
+
+    for_formals(formal, fn) {
+      if (formal->typeInfo() == dtString) {
+        if (fn->instantiatedFrom == NULL) {
+          USR_FATAL_CONT(fn, "extern procedures should not take arguments of "
+                             "type string, use c_string instead");
+        } else {
+          // This is a generic instantiation of an extern proc that is using
+          // string, so we want to report the call sites causing this
+          USR_FATAL_CONT(fn, "extern procedure has arguments of type string");
+          forv_Vec(CallExpr, call, *fn->calledBy) {
+            USR_PRINT(call, "when instantiated from here");
+          }
+          USR_PRINT(fn, "use c_string instead");
+        }
+        break;
+      }
     }
   }
 }

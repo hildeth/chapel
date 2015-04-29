@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -24,9 +24,11 @@
 #include "symbol.h"
 
 #include "astutil.h"
+#include "stlUtil.h"
 #include "bb.h"
 #include "build.h"
 #include "codegen.h"
+#include "docsDriver.h"
 #include "expr.h"
 #include "files.h"
 #include "intlimits.h"
@@ -38,11 +40,14 @@
 #include "stringutil.h"
 #include "type.h"
 
+#include "AstToText.h"
 #include "AstVisitor.h"
 #include "CollapseBlocks.h"
 
 #include <cstdlib>
 #include <inttypes.h>
+#include <iostream>
+#include <sstream>
 #include <stdint.h>
 
 //
@@ -60,7 +65,7 @@ Symbol *gNil = NULL;
 Symbol *gUnknown = NULL;
 Symbol *gMethodToken = NULL;
 Symbol *gTypeDefaultToken = NULL;
-Symbol *gLeaderTag = NULL, *gFollowerTag = NULL;
+Symbol *gLeaderTag = NULL, *gFollowerTag = NULL, *gStandaloneTag = NULL;
 Symbol *gModuleToken = NULL;
 Symbol *gNoInit = NULL;
 Symbol *gVoid = NULL;
@@ -78,6 +83,7 @@ VarSymbol *gTrue = NULL;
 VarSymbol *gFalse = NULL;
 VarSymbol *gTryToken = NULL;
 VarSymbol *gBoundsChecking = NULL;
+VarSymbol *gCastChecking = NULL;
 VarSymbol* gPrivatization = NULL;
 VarSymbol* gLocal = NULL;
 VarSymbol* gNodeID = NULL;
@@ -150,6 +156,10 @@ bool Symbol::isParameter() const {
   return false;
 }
 
+bool Symbol::isRenameable() const {
+  return !(hasFlag(FLAG_EXPORT) || hasFlag(FLAG_EXTERN));
+}
+
 
 GenRet Symbol::codegen() {
   GenInfo* info = gGenInfo;
@@ -203,6 +213,44 @@ bool Symbol::isImmediate() const {
   return false;
 }
 
+
+/******************************** | *********************************
+*                                                                   *
+* Common base class for ArgSymbol and VarSymbol.                    *
+* Also maintains a small amount of IPE specific state.              *
+*                                                                   *
+********************************* | ********************************/
+
+LcnSymbol::LcnSymbol(AstTag      astTag,
+                     const char* initName,
+                     Type*       initType) :
+  Symbol(astTag, initName, initType)
+{
+  mDepth  = -1;
+  mOffset = -1;
+}
+
+LcnSymbol::~LcnSymbol()
+{
+
+}
+
+void LcnSymbol::locationSet(int depth, int offset)
+{
+  mDepth  = depth;
+  mOffset = offset;
+}
+
+int LcnSymbol::depth() const
+{
+  return mDepth;
+}
+
+int LcnSymbol::offset() const
+{
+  return mOffset;
+}
+
 /******************************** | *********************************
 *                                                                   *
 *                                                                   *
@@ -210,9 +258,10 @@ bool Symbol::isImmediate() const {
 
 VarSymbol::VarSymbol(const char *init_name,
                      Type    *init_type) :
-  Symbol(E_VarSymbol, init_name, init_type),
+  LcnSymbol(E_VarSymbol, init_name, init_type),
   immediate(NULL),
-  doc(NULL)
+  doc(NULL),
+  isField(false)
 {
   gVarSymbols.add(this);
 }
@@ -261,6 +310,80 @@ bool VarSymbol::isConstValWillNotChange() const {
 bool VarSymbol::isParameter() const {
   return hasFlag(FLAG_PARAM) || immediate;
 }
+
+
+bool VarSymbol::isType() const {
+  return hasFlag(FLAG_TYPE_VARIABLE);
+}
+
+
+std::string VarSymbol::docsDirective() {
+  std::string result;
+  if (fDocsTextOnly) {
+    result = "";
+  } else {
+    // Global type aliases become type directives. Types that are also fields
+    // could be generics, so let them be treated as regular fields (i.e. use
+    // the attribute directive).
+    if (this->isType() && !this->isField) {
+      result = ".. type:: ";
+    } else if (this->isField) {
+      result = ".. attribute:: ";
+    } else {
+      result = ".. data:: ";
+    }
+  }
+  return this->hasFlag(FLAG_CONFIG) ? result + "config " : result;
+}
+
+
+void VarSymbol::printDocs(std::ostream *file, unsigned int tabs) {
+  if (this->hasFlag(FLAG_NO_DOC) || this->hasFlag(FLAG_SUPER_CLASS)) {
+      return;
+  }
+
+  this->printTabs(file, tabs);
+  *file << this->docsDirective();
+
+  if (this->isType()) {
+    *file << "type ";
+  } else if (this->isConstant()) {
+    *file << "const ";
+  } else if (this->isParameter()) {
+    *file << "param ";
+  } else {
+    *file << "var ";
+  }
+
+  AstToText info;
+  info.appendVarDef(this);
+  *file << info.text();
+
+  *file << std::endl;
+
+  // For .rst mode, put a line break after the .. data:: directive and
+  // its description text.
+  if (!fDocsTextOnly) {
+    *file << std::endl;
+  }
+
+  if (this->doc != NULL) {
+    this->printDocsDescription(this->doc, file, tabs + 1);
+    if (!fDocsTextOnly) {
+      *file << std::endl;
+    }
+  }
+}
+
+
+/*
+ * For docs, when VarSymbol is used for class fields, identify them as such by
+ * calling this function.
+ */
+void VarSymbol::makeField() {
+  this->isField = true;
+}
+
 
 #ifdef HAVE_LLVM
 static
@@ -555,7 +678,7 @@ GenRet VarSymbol::codegen() {
     // for LLVM
 
     // Handle extern type variables.
-    if( hasFlag(FLAG_EXTERN) && hasFlag(FLAG_TYPE_VARIABLE) ) {
+    if( hasFlag(FLAG_EXTERN) && isType() ) {
       // code generate the type.
       GenRet got = typeInfo();
       return got;
@@ -703,7 +826,7 @@ void VarSymbol::codegenGlobalDef() {
 
     if( this->hasFlag(FLAG_EXTERN) ) {
       // Make sure that it already exists in the layered value table.
-      if( hasFlag(FLAG_TYPE_VARIABLE) ) {
+      if( isType() ) {
         llvm::Type* t = info->lvt->getType(cname);
         if( ! t ) {
           // TODO should be USR_FATAL
@@ -826,7 +949,7 @@ void VarSymbol::accept(AstVisitor* visitor) {
 ArgSymbol::ArgSymbol(IntentTag iIntent, const char* iName,
                      Type* iType, Expr* iTypeExpr,
                      Expr* iDefaultExpr, Expr* iVariableExpr) :
-  Symbol(E_ArgSymbol, iName, iType),
+  LcnSymbol(E_ArgSymbol, iName, iType),
   intent(iIntent),
   typeExpr(NULL),
   defaultExpr(NULL),
@@ -955,6 +1078,27 @@ bool ArgSymbol::isParameter() const {
 }
 
 
+const char* retTagDescrString(RetTag retTag) {
+  switch (retTag) {
+    case RET_VALUE: return "value";
+    case RET_REF:   return "ref";
+    case RET_PARAM: return "param";
+    case RET_TYPE:  return "type";
+    default:        return "<unknown RetTag>";
+  }
+}
+
+
+const char* modTagDescrString(ModTag modTag) {
+  switch (modTag) {
+    case MOD_INTERNAL:  return "internal";
+    case MOD_STANDARD:  return "standard";
+    case MOD_USER:      return "user";
+    default:            return "<unknown ModTag>";
+  }
+}
+
+
 // describes this argument's intent (for use in an English sentence)
 const char* ArgSymbol::intentDescrString(void) {
   switch (intent) {
@@ -972,6 +1116,23 @@ const char* ArgSymbol::intentDescrString(void) {
 
   INT_FATAL(this, "unknown intent");
   return "unknown intent";
+}
+
+// describes the given intent (for use in an English sentence)
+const char* intentDescrString(IntentTag intent) {
+  switch (intent) {
+    case INTENT_BLANK:     return "blank intent";
+    case INTENT_IN:        return "'in' intent";
+    case INTENT_INOUT:     return "'inout' intent";
+    case INTENT_OUT:       return "'out' intent";
+    case INTENT_CONST:     return "'const' intent";
+    case INTENT_CONST_IN:  return "'const in' intent";
+    case INTENT_CONST_REF: return "'const ref' intent";
+    case INTENT_REF:       return "'ref' intent";
+    case INTENT_PARAM:     return "'param' intent";
+    case INTENT_TYPE:      return "'type' intent";
+    default:               return "<unknown intent>";
+  }
 }
 
 
@@ -1046,7 +1207,8 @@ TypeSymbol::TypeSymbol(const char* init_name, Type* init_type) :
   Symbol(E_TypeSymbol, init_name, init_type),
     llvmType(NULL),
     llvmTbaaNode(NULL), llvmConstTbaaNode(NULL),
-    llvmTbaaStructNode(NULL), llvmConstTbaaStructNode(NULL)
+    llvmTbaaStructNode(NULL), llvmConstTbaaStructNode(NULL),
+    doc(NULL)
 {
   addFlag(FLAG_TYPE_VARIABLE);
   if (!type)
@@ -1128,7 +1290,7 @@ void TypeSymbol::codegenMetadata() {
   llvm::LLVMContext& ctx = info->module->getContext();
   // Create the TBAA root node if necessary.
   if( ! info->tbaaRootNode ) {
-    llvm::Value* Ops[1];
+    LLVM_METADATA_OPERAND_TYPE* Ops[1];
     Ops[0] = llvm::MDString::get(ctx, "Chapel types");
     info->tbaaRootNode = llvm::MDNode::get(ctx, Ops);
   }
@@ -1182,16 +1344,17 @@ void TypeSymbol::codegenMetadata() {
       hasEitherFlag(FLAG_DATA_CLASS,FLAG_WIDE_CLASS) ) {
     // Now create tbaa metadata, one for const and one for not.
     {
-      llvm::Value* Ops[2];
+      LLVM_METADATA_OPERAND_TYPE* Ops[2];
       Ops[0] = llvm::MDString::get(ctx, cname);
       Ops[1] = parent;
       llvmTbaaNode = llvm::MDNode::get(ctx, Ops);
     }
     {
-      llvm::Value* Ops[3];
+      LLVM_METADATA_OPERAND_TYPE* Ops[3];
       Ops[0] = llvm::MDString::get(ctx, cname);
       Ops[1] = constParent;
-      Ops[2] = llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx), 1);
+      Ops[2] = llvm_constant_as_metadata(
+                   llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx), 1));
       llvmConstTbaaNode = llvm::MDNode::get(ctx, Ops);
     }
   }
@@ -1207,8 +1370,8 @@ void TypeSymbol::codegenMetadata() {
 
   if( ct ) {
     // Now create the tbaa.struct metadata nodes.
-    llvm::SmallVector<llvm::Value*, 16> Ops;
-    llvm::SmallVector<llvm::Value*, 16> ConstOps;
+    llvm::SmallVector<LLVM_METADATA_OPERAND_TYPE*, 16> Ops;
+    llvm::SmallVector<LLVM_METADATA_OPERAND_TYPE*, 16> ConstOps;
 
     const char* struct_name = ct->classStructName(true);
     llvm::Type* struct_type_ty = info->lvt->getType(struct_name);
@@ -1228,11 +1391,11 @@ void TypeSymbol::codegenMetadata() {
         unsigned gep = ct->getMemberGEP(field->cname);
         llvm::Constant* off = llvm::ConstantExpr::getOffsetOf(struct_type, gep);
         llvm::Constant* sz = llvm::ConstantExpr::getSizeOf(fieldType);
-        Ops.push_back(off);
-        Ops.push_back(sz);
+        Ops.push_back(llvm_constant_as_metadata(off));
+        Ops.push_back(llvm_constant_as_metadata(sz));
         Ops.push_back(field->type->symbol->llvmTbaaNode);
-        ConstOps.push_back(off);
-        ConstOps.push_back(sz);
+        ConstOps.push_back(llvm_constant_as_metadata(off));
+        ConstOps.push_back(llvm_constant_as_metadata(sz));
         ConstOps.push_back(field->type->symbol->llvmConstTbaaNode);
         llvmTbaaStructNode = llvm::MDNode::get(ctx, Ops);
         llvmConstTbaaStructNode = llvm::MDNode::get(ctx, ConstOps);
@@ -1889,10 +2052,10 @@ void FnSymbol::codegenDef() {
   }
 
   {
-    Vec<BaseAST*> asts;
+    std::vector<BaseAST*> asts;
     collect_top_asts(body, asts);
 
-    forv_Vec(BaseAST, ast, asts) {
+    for_vector(BaseAST, ast, asts) {
       if (DefExpr* def = toDefExpr(ast))
         if (!toTypeSymbol(def->sym)) {
           if (fGenIDS && isVarSymbol(def->sym))
@@ -1912,7 +2075,13 @@ void FnSymbol::codegenDef() {
 #ifdef HAVE_LLVM
     info->lvt->removeLayer();
     if( developer ) {
-      if(llvm::verifyFunction(*func, llvm::PrintMessageAction)){
+      bool problems;
+#if HAVE_LLVM_VER >= 35
+      problems = llvm::verifyFunction(*func, &llvm::errs());
+#else
+      problems = llvm::verifyFunction(*func, llvm::PrintMessageAction);
+#endif
+      if( problems ) {
         INT_FATAL("LLVM function verification failed");
       }
     }
@@ -2179,6 +2348,109 @@ void FnSymbol::accept(AstVisitor* visitor) {
   }
 }
 
+// This function is a method on an aggregate type
+bool FnSymbol::isMethod() const {
+  return hasFlag(FLAG_METHOD);
+}
+
+// This function is a method on an aggregate type, defined within its
+// declaration
+bool FnSymbol::isPrimaryMethod() const {
+  return hasFlag(FLAG_METHOD_PRIMARY);
+}
+
+// This function is a method on an aggregate type, defined outside its
+// definition
+bool FnSymbol::isSecondaryMethod() const {
+  return isMethod() && !isPrimaryMethod();
+}
+
+
+// This function or method is an iterator (as opposed to a procedure).
+bool FnSymbol::isIterator() const {
+  return hasFlag(FLAG_ITERATOR_FN);
+}
+
+
+std::string FnSymbol::docsDirective() {
+  if (fDocsTextOnly) {
+    return "";
+  }
+
+  if (this->isMethod() && this->isIterator()) {
+    return ".. itermethod:: ";
+  } else if (this->isIterator()) {
+    return ".. iterfunction:: ";
+  } else if (this->isMethod()) {
+    return ".. method:: ";
+  } else {
+    return ".. function:: ";
+  }
+}
+
+
+void FnSymbol::printDocs(std::ostream *file, unsigned int tabs) {
+  if (this->hasFlag(FLAG_NO_DOC)) {
+    return;
+  }
+
+  // Print the rst directive, if one is needed.
+  this->printTabs(file, tabs);
+  *file << this->docsDirective();
+
+  // Print export. Externs do not get a prefix, since the user doesn't
+  // care whether it's an extern or not (they just want to use the function).
+  // Inlines don't get a prefix for symmetry in modules like Math.chpl and
+  // due to the argument that it's of negligible value in most cases.
+  if (this->hasFlag(FLAG_EXPORT)) {
+    *file << "export ";
+  }
+
+  // Print iter/proc.
+  if (this->isIterator()) {
+    *file << "iter ";
+  } else {
+    *file << "proc ";
+  }
+
+  // Print name and arguments.
+  AstToText info;
+  info.appendNameAndFormals(this);
+  *file << info.text();
+
+  // Print return intent, if one exists.
+  switch (this->retTag) {
+  case RET_REF:
+    *file << " ref";
+    break;
+  case RET_PARAM:
+    *file << " param";
+    break;
+  case RET_TYPE:
+    *file << " type";
+    break;
+  default:
+    break;
+  }
+
+  // Print return type.
+  if (this->retExprType != NULL) {
+    *file << ": ";
+    this->retExprType->body.tail->prettyPrint(file);
+  }
+  *file << std::endl;
+
+  if (!fDocsTextOnly) {
+    *file << std::endl;
+  }
+
+  if (this->doc != NULL) {
+    this->printDocsDescription(this->doc, file, tabs + 1);
+    *file << std::endl;
+  }
+}
+
+
 /******************************** | *********************************
 *                                                                   *
 *                                                                   *
@@ -2241,7 +2513,9 @@ ModuleSymbol::ModuleSymbol(const char* iName,
     initFn(NULL),
     filename(NULL),
     doc(NULL),
-    extern_info(NULL) {
+    extern_info(NULL),
+    moduleNamePrefix("")
+{
 
   block->parentSymbol = this;
   registerModule(this);
@@ -2368,28 +2642,98 @@ Vec<AggregateType*> ModuleSymbol::getTopLevelClasses() {
   return classes;
 }
 
-// Collect the top-level classes for this Module.
+
+void ModuleSymbol::printDocs(std::ostream *file, unsigned int tabs) {
+  if (this->hasFlag(FLAG_NO_DOC)) {
+    return;
+  }
+
+  // Print the module directive first, for .rst mode. This will associate the
+  // Module: <name> title with the module. If the .. module:: directive comes
+  // after the title, sphinx will complain about a duplicate id error.
+  if (!fDocsTextOnly) {
+    *file << ".. default-domain:: chpl" << std::endl << std::endl;
+    *file << ".. module:: " << this->docsName() << std::endl;
+
+    if (this->doc != NULL) {
+      this->printTabs(file, tabs + 1);
+      *file << ":synopsis: ";
+      *file << firstNonEmptyLine(this->doc);
+      *file << std::endl;
+    }
+    *file << std::endl;
+  }
+
+  this->printTabs(file, tabs);
+  const char *moduleTitle = astr("Module: ", this->docsName().c_str());
+  *file << moduleTitle << std::endl;
+
+  if (!fDocsTextOnly) {
+    int length = tabs * this->tabText.length() + strlen(moduleTitle);
+    for (int i = 0; i < length; i++) {
+      *file << "=";
+    }
+    *file << std::endl;
+  }
+
+  if (this->doc != NULL) {
+    // Only print tabs for text only mode. The .rst prefers not to have the
+    // tabs for module level comments and leading whitespace removed.
+    unsigned int t = tabs;
+    if (fDocsTextOnly) {
+      t += 1;
+    }
+
+    this->printDocsDescription(this->doc, file, t);
+    if (!fDocsTextOnly) {
+      *file << std::endl;
+    }
+  }
+}
+
+
+/*
+ * Append 'prefix' to existing module name prefix.
+ */
+void ModuleSymbol::addPrefixToName(std::string prefix) {
+  this->moduleNamePrefix += prefix;
+}
+
+
+/*
+ * Returns name of module, including any prefixes that have been set.
+ */
+std::string ModuleSymbol::docsName() {
+  return this->moduleNamePrefix + this->name;
+}
+
+
+// This is intended to be called by getTopLevelConfigsVars and
+// getTopLevelVariables, since the code for them would otherwise be roughly
+// the same.
+
+// It is also private to ModuleSymbols
 //
-// See the comment on getTopLevelClasses()
-Vec<VarSymbol*> ModuleSymbol::getTopLevelConfigVars() {
-  Vec<VarSymbol*> configs;
+// See the comment on getTopLevelFunctions() for the rationale behind the AST
+// traversal
+void ModuleSymbol::getTopLevelConfigOrVariables(Vec<VarSymbol *> *contain, Expr *expr, bool config) {
+  if (DefExpr* def = toDefExpr(expr)) {
 
-  for_alist(expr, block->body) {
-    if (DefExpr* def = toDefExpr(expr)) {
+    if (VarSymbol* var = toVarSymbol(def->sym)) {
+      if (var->hasFlag(FLAG_CONFIG) == config) {
+        // The config status of the variable matches what we are looking for
+        contain->add(var);
+      }
 
-      if (VarSymbol* var = toVarSymbol(def->sym)) {
-        if (var->hasFlag(FLAG_CONFIG)) {
-          configs.add(var);
-        }
-
-      } else if (FnSymbol* fn = toFnSymbol(def->sym)) {
-        if (fn->hasFlag(FLAG_MODULE_INIT)) {
-          for_alist(expr2, fn->body->body) {
-            if (DefExpr* def2 = toDefExpr(expr2)) {
-              if (VarSymbol* var = toVarSymbol(def2->sym)) {
-                if (var->hasFlag(FLAG_CONFIG)) {
-                  configs.add(var);
-                }
+    } else if (FnSymbol* fn = toFnSymbol(def->sym)) {
+      if (fn->hasFlag(FLAG_MODULE_INIT)) {
+        for_alist(expr2, fn->body->body) {
+          if (DefExpr* def2 = toDefExpr(expr2)) {
+            if (VarSymbol* var = toVarSymbol(def2->sym)) {
+              if (var->hasFlag(FLAG_CONFIG) == config) {
+                // The config status of the variable matches what we are
+                // looking for
+                contain->add(var);
               }
             }
           }
@@ -2397,17 +2741,36 @@ Vec<VarSymbol*> ModuleSymbol::getTopLevelConfigVars() {
       }
     }
   }
+}
+
+// Collect the top-level config variables for this Module.
+Vec<VarSymbol*> ModuleSymbol::getTopLevelConfigVars() {
+  Vec<VarSymbol*> configs;
+
+  for_alist(expr, block->body) {
+    getTopLevelConfigOrVariables(&configs, expr, true);
+  }
 
   return configs;
 }
 
-// Collect the top-level classes for this Module.
+// Collect the top-level variables that aren't configs for this Module.
+Vec<VarSymbol*> ModuleSymbol::getTopLevelVariables() {
+  Vec<VarSymbol*> variables;
+
+  for_alist(expr, block->body) {
+    getTopLevelConfigOrVariables(&variables, expr, false);
+  }
+
+  return variables;
+}
+
+// Collect the top-level functions for this Module.
 //
 // This one is similar to getTopLevelModules() and
-// getTopLevelFunctions except that it collects any
+// getTopLevelClasses() except that it collects any
 // functions and then steps in to initFn if it finds it.
 //
-
 Vec<FnSymbol*> ModuleSymbol::getTopLevelFunctions(bool includeExterns) {
   Vec<FnSymbol*> fns;
 
@@ -2483,17 +2846,26 @@ void ModuleSymbol::accept(AstVisitor* visitor) {
   }
 }
 
-void ModuleSymbol::moduleUseAddChapelStandard() {
-  UnresolvedSymExpr* modRef = 0;
+void ModuleSymbol::addDefaultUses() {
+  if (modTag != MOD_INTERNAL) {
+    UnresolvedSymExpr* modRef = 0;
 
-  SET_LINENO(this);
+    SET_LINENO(this);
 
-  modRef = new UnresolvedSymExpr("ChapelStandard");
-  block->insertAtHead(new CallExpr(PRIM_USE, modRef));
+    modRef = new UnresolvedSymExpr("ChapelStandard");
+    block->insertAtHead(new CallExpr(PRIM_USE, modRef));
+
+  // We don't currently have a good way to fetch the root module by name.
+  // Insert it directly rather than by name
+  } else if (this == baseModule) {
+    SET_LINENO(this);
+
+    block->moduleUseAdd(rootModule);
+  }
 }
 
 //
-// MDN 2014/07/22
+// NOAKES 2014/07/22
 //
 // There is currently a problem in functionResolve that this function
 // has a "temporary" work around for.
@@ -2867,7 +3239,7 @@ VarSymbol* newTemp(const char* name, Type* type) {
     if (localTempNames)
       name = astr("_t", istr(tempID++), "_");
     else
-      name = "_tmp";
+      name = "tmp";
   }
   VarSymbol* vs = new VarSymbol(name, type);
   vs->addFlag(FLAG_TEMP);
