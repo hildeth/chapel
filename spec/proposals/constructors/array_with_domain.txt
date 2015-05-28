@@ -1,0 +1,84 @@
+This is a sketch of a simple array type that uses a domain as the representation of its
+index set.  As before, we desire to show that the array implementation can support both a
+standard, default-initialized array declaration and a noinit-initialized declaration.
+
+
+IMPLEMENTATION SKETCH
+  class _domain {
+    /* Supports the DSI interface. // (1)
+  }
+
+  record array_with_domain {
+    type eltType;
+    var _dom : _domain;
+    var _data : _ddata;
+
+    ctor(type eltType, dom : _domain, param initData = true)
+    with (eltType = eltType, _dom = dom)
+    {
+      // I am storing a copy of the dom, so I have to bump its ref count.
+      _dom.incRefCount();
+      _data = allocate();
+      initialize(initData);
+    }
+    
+    dtor() {
+      // I have to release my reference to the dom.
+      _dom.destroyDom();
+      _ddata_free(_data);
+    }
+
+    proc allocate() {
+      var size = _dom.size;
+      _data = _ddata_allocate(size, eltType);
+    }
+
+    proc initialize(param default_initialize = true) {
+      forall i in _dom do
+        if default_initialize then
+          pragma "allow reinitialization" // (3)
+          _dom.dsiAccess(i).ctor();  // (2)
+        else
+          pragma "allow reinitialization" // (3)
+          _dom.dsiAccess(i).ntor();  // (2)
+    }
+  }
+
+  var D = {1..2, 3..4};
+
+  // These are un-sugared calls to create arrays with a domain.
+  var A : array_with_domain(real, D, initData = true);
+  var B : array_with_domain(imag, D, initData = false);
+
+  // The equivalent sugared declarations would be:
+  var A : [D] real;
+  var B : [D] imag = noinit;
+
+
+NOTES
+(1) Assume that all domains inherit from _domain and support the DSI interface.
+(2) dsiAccess() returns a reference to the element being accessed, so it can be updated by
+the ctor() or ntor() call.
+(3) The pragma indicates that it will probably normally generate an error if code attempts
+to apply a constructor to an object that has already been allocated.  That is because
+allocation is normally tied to initialization.  In normal code, invoking a construct on an
+existing object can (but does not necessarily) result in leaked memory and other consistency
+problems.  _ddata arrays are special, because _ddata_allocate allocates an array of
+objects that are known to be uninitialized.  So it is reasonable to override the
+error/warning message in this particular case.  You probably would see this pragma only in
+container implementations (arrays, heaps, etc.); it would be rare to find it in
+application code.
+
+
+DISCUSSION
+
+The domain is stored "raw" within the array_with_domain type.  That means that the array
+is responsible for maintaining the reference count inside the domain.  The language-level
+domain has to be record-wrapped, so that MM happens automatically, but it might be more
+efficient to store and manipulate the raw _domain class within the array implementation.
+
+The array implementation shows is as a record.  This would not support array aliases.  But
+conversion to a form that would would involve turning the record into a class, adding a
+reference count and then wrapping the class in a record to perform automatic MM.
+
+

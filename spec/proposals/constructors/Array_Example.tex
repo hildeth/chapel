@@ -137,8 +137,8 @@ second will call the noinit constructor; the third will call an overloaded versi
 constructor that accepts a constant initializer value.
 
 In the current implementation, the array constructor called by the compiler through the
-call chain \chpl{chpl__buildArrayRuntimeType()} $\rarrow$ \chpl{_domain.buildArray(eltType)}
-$\rarrow$ \chpl{dom.dsiBuildArray(eltType)}.  The implementation for
+call chain \chpl{chpl__buildArrayRuntimeType()} --> \chpl{_domain.buildArray(eltType)}
+--> \chpl{dom.dsiBuildArray(eltType)}.  The implementation for
 \chpl{DefaultRectangularDom.dsiBuildArray} currently looks like:
 \begin{chapel}
     proc DefaultRectangularDom.dsiBuildArray(type eltType) {
@@ -208,7 +208,7 @@ constructor that will do the same thing.
 \end{chapel}
 We must also take into consideration the \chpl{initialize()} function.  It is called
 implicitly by the compiler currently.  Support going forward can be obtaind by calling it
-explicitly instead.  We will pull out the noinit_data test, as this is precisely the
+explicitly instead.  We will pull out the noinit\_data test, as this is precisely the
 choice we want to make for default- versus noinit-construction.
 \begin{chapel}
     proc initialize() {
@@ -226,7 +226,7 @@ choice we want to make for default- versus noinit-construction.
 \end{chapel}
 \noindent
 When initialization takes place, the passed-in initial value is passed along to
-_ddata_allocate, so it can use that to initialize elements.  The definition of
+\chpl{_ddata_allocate}, so it can use that to initialize elements.  The definition of
 \chpl{_ddata_allocate} is modified accordingly.
 \begin{chapel}
   inline proc _ddata_allocate(type eltType, size: integral) {
@@ -337,7 +337,7 @@ This design still suffers from the disadvantage that the entire array is allocat
 every element initialized in bulk.  Supposing that we are expecting to overwrite the array
 after it is initialized, we can have a different form of \chpl{initialize()} that only
 allocates and does not initialize.  We can factor the element initialization out of
-_ddata_allocate():
+\chpl{_ddata_allocate()}:
 \begin{chapel}
   inline proc _ddata_allocate(type eltType, size: integral) {
     var ret:_ddata(eltType);
