@@ -10,8 +10,6 @@ Here is a synopsis of the proposed changes, in approximate priority order.
 \begin{itemize}[leftmargin=2.5cm]
 \item[\bf Use Copy-Constructors] -- in place of assignment in initialization.  This is a UMM requirement.
 \item[\bf Rename initCopy] -- For consistency, mostly.
-\item[\bf Simplify defaultOf] -- Rework the implementation of \chpl{_defaultOf()} so it takes
-  precedence over the user-defined default constructor (and calls it unless overridden).
 \item[\bf Unify Initialization] -- Reduce the initialization logic to a single conditional:
   Use the explicit initializer if present; otherwise, call \chpl{_defaultOf()}.
 \item[\bf Separate Allocation] -- Pull allocation out of class constructors and get rid of the
@@ -31,8 +29,6 @@ Here is a synopsis of the proposed changes, in approximate priority order.
   would be carried through to resolution rather than being squashed out of the AST during
   normalization.  Advantages: Simplify type inference and separate type inference from
   initialization.  Disadvantages: Major implementation change.
-\item[\bf Add ctor keyword] -- and optional naming, to better support generic
-  programming.
 \item[\bf Field Extraction] -- Some AST could be simplified if a field-extraction primitive
   were supported.
 \end{itemize}
@@ -81,9 +77,6 @@ Rename initCopy & Med & Med & More consistent object model increases usability, 
  & & & initCopy and autoCopy and coming up with a constructor model that \\
  & & & accommodates both.  Plus the usual internal dependencies.  Additional\\
  & & & benefit is removing special-case code (pragma "init copy fn", etc.). \\ \hline
-Simplify defaultOf & Med & Low & Rewrite \chpl{_defaultOf()} implementation to \\
- & & & give it priority over the user-defined zero-args constructor \\
- & & & for consistency and simplicity in the code.\\ \hline
 Unify Initialization & Med & Low & Mostly in place and a clean-up task suggested to \\
  & & & Lydia.  Enables the removal of zero-initialization. \\ \hline
 Separate Allocation & Med & Low & Means getting rid of the \chpl{meme} argument. \\
@@ -112,6 +105,5 @@ Normalize Type Inference & High & High & Reverse very bad design decision. Compl
  & & & involved, but may be bumped based on need. \\ \hline
 Field Extraction & Low & Low & Enable further optimization of the AST using in-place \\
  & & & updates of record fields. \\ \hline
-Add \chpl{ctor} Keyword & Low & Med & Better support for generic programming.  Low current need. \\ \hline
 \end{tabular}
 

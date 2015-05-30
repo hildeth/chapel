@@ -17,6 +17,7 @@ When \chpl{T} is a record type, we expect the following Chapel code
 \end{chapel}
 \noindent
 to produce the corresponding AST:
+%TODO: Review notes.  I think we are using a noinit constructor now.
 \begin{numberedchapel}
   var s:R
   (call _defaultOf s) // Calls R._defaultOf()

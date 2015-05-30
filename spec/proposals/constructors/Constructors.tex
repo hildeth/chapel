@@ -15,41 +15,22 @@ Default-initialization is supplied by the compiler, so it has no corresponding s
 element.\footnote{A separate proposal is being developed for a ``no-init'' capability,
   whereby default-initialization may be overridden in whole or in part.}
 
-\begin{openissue}
 Taken together, the semantics being proposed for variable and field initialization and
-construction imply that every such object will be initialized one way or the other.  In
-that case, the default-initialization (a.k.a. zero-initialization) step mentioned in the
-object lifecycle can be omitted.
+construction imply that every such object will be initialized one way or the
+other.  That being the case, the default-initialization
+(a.k.a. zero-initialization) step can be omitted.
 
-I believe that zero-initialization is a part of the C++ specification to support backward
-compatibility with C, and to allow the creation of global and file-scope static objects
-that are in a known state before their construction at the start of execution commences.
-This is important in the execution environment envisioned for programs of that period,
-especially since the order of initialization of global and file-scope objects from
-different compilation units is unspecified.
-
-In modern programming practice, however, the use of global objects is strongly
-discouraged.  And if initialization order is strictly specified by the language, then the
-need for such zero-initialization disappears.  
-
-Given its negative impact on performance, the recommendation here is to remove
-zero-initialization unless a strong case can be made for it.  I left it as an open
-issue in case there are use cases that I have overlooked.
-\end{openissue}
-
-Default-initialization (if performed) is followed by field-initialization.  Field-initialization
+Field-initialization
 constructs each field in an object in an order specified in the Semantics
 (\rsec{Constructor_Semantics} subsection below.  The syntactical elements influencing
 field-initialization are the field declarations and the initializers appearing in the
 \sntx{initializer-list}.  Field-initialization is complete before control enters the body
 of the constructor.
 
-The body of the constructor performs the actual construction of the object.  If a class or
-record type is merely an aggregation of the fields it contains, it imposes no further
-invariants on its contents.
-Thus, it is quite common for a constructor body to be empty.
+The body of the constructor performs the actual construction of the object.  
 
 The syntax of a constructor may thus be set down as:
+% This needs to be revised!
 \begin{syntax}
 constructor-declaration-statement:
   linkage-specifier[OPT] `ctor' type-binding constructor-name[OPT] argument-list 
@@ -66,10 +47,15 @@ initializer-list:
   initializer-list , initializer
 
 initializer:
-  field-name = expression
+  field-name = initializer-expression
+  field-name
 
 field-name:
   identifier
+
+initializer-expression:
+  expression
+  `noinit'
 
 constructor-body:
   statement
@@ -166,7 +152,7 @@ constructor-call-expression:
   `new' type-name ( named-expression-list[OPT] )
 \end{syntax}
 The \sntx{type-name} must name a type.  The named type may be generic.
-The set of visible constructors are all constructors defined for that type.  Usual
+The set of visible constructors is the set of all constructors defined for that type.  Usual
 generic instantiation rules are applied to the set of visible functions to select a set of
 candidate constructors.  Any \chpl{where} clauses are then applied to reduce the set of
 candidates.  Disambiguation is applied to select the best candidate from among those
@@ -196,6 +182,8 @@ as well as the names of any fields that have already been initialized may be use
 use of the name of any field that has not yet been initialized is illegal.\footnote{This
   can be reported as a syntax error, since the error condition can be detected
   statically.}
+
+%TODO: Add a description of pseudo-fields.
 
 After the initializer-list has been processed, some fields may remain uninitialized.
 These fields are initialized using the initializers specified for them in the
@@ -230,14 +218,14 @@ of \chpl{b} to \chpl{3}.
 The second example would be flagged as containing a coding error.  In the initializer
 list, the field name \chpl{b} is accessed in the initialization expression for \chpl{d}
 before \chpl{b} has been initialized.  This could be repaired by initializing \chpl{b}
-explicitly before the initializer for \chpl{d} is encountered.  We might consider special
-syntax, where mentioning just the name of a field would mean ``use the field-default
-initializer for this field.  In which case
+explicitly before the initializer for \chpl{d} is encountered.  A
+field-initializer mentioning just the name of a field means ``use the field-default
+initializer for this field''.  The constructor
 \begin{chapel}
   ctor(_c) with (a = 2, c = _c, b, d = a**b) {}
 \end{chapel}
 \noindent
-would mean, ``initialize \chpl{a} to \chpl{2}, \chpl{c} to \chpl{_c}, \chpl{b} to \chpl{3}
+means, ``initialize \chpl{a} to \chpl{2}, \chpl{c} to \chpl{_c}, \chpl{b} to \chpl{3}
 and then \chpl{d} to \chpl{8}.''
 
 \subsubsection{\chpl{const} Objects and Fields}
@@ -272,12 +260,12 @@ record R {
   ctor (i : int) with (_i = i) { _r = 2.0; }
 
   // Error: Cannot write _i in the body of the constructor since it is const.
-//  ctor (r : real) with (_r = r) { _i = 3; }
+  ctor (r : real) with (_r = r) { _i = 3; }
 }
 
 const r = new R(4);  // The update of r._r in the body of the constructor is legal.
 writeln(r); // (_i = 4, _r = 2.0)
-// r._r = 4.2;  // Error: r is const, so no updates after initialization.
+r._r = 4.2;  // Error: r is const, so no updates after initialization.
 \end{chapel}
 
 
@@ -311,7 +299,7 @@ should be interpreted roughly as
 r.R();
 \end{chapel}
 That is, the a constructor for type \chpl{R} is called as a method, specifying \chpl{r} as
-the receiver and passing no arguments.\footnote{The \chpl{_defaultOf()} feature, as proposed,
+the receiver and passing no arguments.\footnote{The \chpl{_defaultOf()} feature
   allows the user to override the compiler-supplied behavior of calling the record's
   zero-args constructor.}
 

@@ -14,7 +14,7 @@ been applied uniformly across all types, memory is still leaked.
 To provide the user full control over memory management, the compiler needs to be modified
 to call UMM support routines at all the necessary places in the code.  These consist
 of two particular constructors (the zero-args constructor and the copy-constructor),
-assignment and the destructor.  It is hoped that by applying these calls in a consistent
+assignment and the destructor.  By applying these calls in a consistent
 manner, type-specific handling of memory management can be removed and the compiler
 rendered simpler.
 
@@ -25,6 +25,7 @@ model as it relates to the current Chapel implementation, and makes recommendati
 the existing specification should be updated.  In addition, it provides recommendations for
 syntactical and semantical modifications that may make that model more usable.
 
+% Reorganize to follow a top-down organization.
 The remainder of this document is organized as follows: Section \rsec{Objects} discusses
 the object life-cycle and provides a brief overview of the User-Managed Memory model.  It
 also contains general information common to the other sections.  Section

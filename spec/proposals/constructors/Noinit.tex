@@ -3,7 +3,7 @@
 \section{The {\bf noinit} Initializer}
 \label{noinit}
 
-This section describes the proposed syntax and semantics for the \chpl{noinit}
+This section describes the syntax and semantics for the \chpl{noinit}
 initializer.
 
 \subsection{Syntax}
@@ -12,7 +12,7 @@ initializer.
 The special initializer \chpl{noinit} may appear anywhere an \sntx{initializer-expression}
 may appear: in a variable or field declaration or as the initialization expression in an
 initializer-list.  To include \chpl{noinit} in the syntax, we replace \sntx{expression}
-with \sntx{initializer-expression} in those context and define the latter as:
+with \sntx{initializer-expression} in those contexts and define the latter as:
 \begin{syntax}
 initializer-expression:
   expression
@@ -22,6 +22,7 @@ initializer-expression:
 \subsection{Semantics}
 \label{noinit_Semantics}
 
+%TODO: Is this description current?
 When the variable or field being initialized is of a scalar type (integer, real, imaginary,
 complex, bool, enum), presence of the \chpl{noinit} initializer disables the normal
 default initialization. 
@@ -67,12 +68,13 @@ the \chpl{noinit} flag to be defined recursively.  Moreover, it provides a path 
 most of the initialization of a record can be inhibited --- should the record author deem
 that desirable.  
 
+%TODO: Refine this into a proposal.
 The example in the next subsection shows that careful coding can result in record
 initialization that overrides the language default behavior and leaves some or all of the
 fields partially or completely uninitialized.  The way this is achieved under the current
 proposal is rather verbose, so we might consider alternate syntax that inhibits field
 initialization by default rather than having it on by default.  We
-might have an alternate keyword to indicate that only the named fields are participate in
+might have an alternate keyword to indicate that only the named fields participate in
 field-initialization in a constructor.  As a strawman, consider \chpl{with only}
 \begin{chapel}
 ctor R(x : real)

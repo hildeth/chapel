@@ -6,7 +6,9 @@ optional initializers and their impact upon object initialization.  This proposa
 address the behavior of the \sntx{no-initialization-part} with respect to class and record
 types.  That behavior is the subject of a separate design.
 
-The present proposal seeks to address the sometimes surprising semantics arising from
+The present proposal seeks to address the sometimes surprising
+semantics\footnote{The existing semantics are surprising due to the number of
+  copy operations involved.} arising from
 initialization depending on whether the type is specified.  It also seeks to define
 initialization in terms of construction, and remove unnecessary data motion as much as
 possible.
@@ -15,8 +17,8 @@ Thus, the proposal mainly deals with implementation details.  The proposed chang
 not affect the functional behavior of programs: they should affect only performance.  The
 observable changes will affect the total amount of memory allocated and freed, the amount
 of processing time spent in data motion and the number of times copy-constructors and
-copy-assignment operators are called.  But filtering out a program's introspection
-w.r.t. these quantities, its output should remain unaffected.
+copy-assignment operators are called.  But filtering out a its introspection
+w.r.t. these quantities, a program's output should remain unaffected.
 
 \subsection{Syntax}
 
@@ -48,7 +50,7 @@ The flattened AST creates a temporary object that has the value of the initializ
 expression (if present) or an invocation of \chpl{PRIM_INIT} on the type expression
 provided.  That temporary is copied into the declared variable by assignment.  
 
-In contrast, we propose that at least the exprType portion of the representation be left in
+In contrast, we propose that the \chpl{exprType} portion of the representation be left in
 place, at least until resolution is complete.
 The expression representing an \chpl{exprType} must evaluate to a type.  Once type
 resolution is complete, it can be discarded.  
@@ -94,7 +96,7 @@ copy of a reference (pointer) to that unnamed object, the copy is not expensive.
 For record types, the story is different.  In general, the semantics of assignment are not
 defined if the left operand is in an uninitialized state.  So using assignment to
 initialize the named variable is flat wrong.  If the initializer expression is a named
-object (see below) then at worst copy-construction should be used.  But for constructor
+object (see below) then copy-construction should be used.  But for constructor
 calls we can do even better by eliminating the copy entirely.
 
 Secondly, it is wasteful of effort to gin up
@@ -138,14 +140,7 @@ applies to records and record-based types (e.g. tuples and ranges).
 \subsection{Discussion}
 
 Using copy-construction in place of assignment does not currently make any difference as
-long as the compiler-provided versions of those methods are used.  However, for
-user-defined record types, the assumption of prior initialization of the left operand of
-assignment can be violated, and such a violation may cause incorrect behavior.  I believe
-we already have one test case that fails (only in multi-locale testing) due to this
-problem (in privatized arrays, because the default privatization index is not distinguished
-from a valid one).  More such problems may appear as greater use is made of records to
-support ad hoc memory management schemes.  The simple solution is to ``do it
-right''.
+long as the compiler-provided versions of those methods are used.  
 
 Normalizing type inference will get rid of the extra type variable initialization code.
 After which, unifying the initialization code just means adding a \chpl{_defaultOf} call

@@ -1,12 +1,13 @@
+% Turn this into an appendix
 \section{The Object Lifecycle Model and UMM}
 \label{Objects}
 
 
-The interaction of language semantics and the User-Managed Memory model can be discussed
-in terms of state transitions in the object lifecycle.  For background, a summary of the
-object lifecycle is presented in the following subsection.  We then discuss the
+The interaction of language semantics and the User-Managed Memory model is discussed
+in terms of state transitions in the object lifecycle.  We discuss the
 transitions made by the current constructor model, and how the proposed constructor model
-would navigate these same transitions.
+would navigate these same transitions.  For background, a summary of the
+object lifecycle is presented in the following subsection.  
 
 
 \subsection{The Object Lifecycle}
@@ -42,12 +43,12 @@ default-initialized object.\footnote{This can be stated more simply using just t
 
 Field-initialization consists of bringing each field in an aggregate type into a
 state consistent with the field declarations.  If the field is declared without
-a specified initializer, then the default constructor (for the type of that
-field) is called; otherwise, a constructor for the type of that field is called,
-passing the initialization expression for that field as its operand.
+a specified initializer, then the default constructor for the type of that
+field is called; otherwise, a constructor which can convert the initialization
+expression to the type of that field is called.
 
 Following field-initialization, the actions specified in the body of the
-constructor are called.  In many cases, the body of the constructor is empty,
+constructor are called.  In many cases, the body of the constructor is empty
 because the actions of default- and field-initialization bring the object into a
 state consistent with the desired class invariants.  In any case, after the body
 of one of its constructors has run to completion, the object is
@@ -65,7 +66,7 @@ Once an object has been destroyed, an implementation may reuse or reclaim it.
 This may happen immediately or at some unspecified future time.  After it has
 been reclaimed, the object returns to the undefined state.
 
-
+%Turn this into an appendix?
 \subsection{Initialization in the Current Implementation}
 
 Initialization is the sequence of actions that take place when a variable is prepared for
@@ -86,6 +87,12 @@ there to be three canonical forms for variable declaration and initialization:
 \noindent
 In the final form, any expression coercible to type \chpl{T} should exhibit the same
 semantics, so we could e.g. have said \chpl{var c:T = a;} instead, for example.
+
+\begin{future}
+In the expression \chpl{var t:T = a;}, if \chpl{a} is of type \chpl{A} coercible
+to type \chpl{T} and there exists a constructor
+\chpl{T(a:A)} and also a copy constructor \chpl{T(t:T)}, then which is called?
+\end{future}
 
 In only the final form, the explicit type specifier on the variable may be omitted.  In that
 case the compiler infers the type from the initializer expression.  In the other forms,
@@ -203,7 +210,7 @@ these problems is currently underway.
 Somewhat to my surprise, the forms involving type inference are not merely normalized
 to their corresponding canonical forms.  They follow a completely different translation
 pathway.  I suspect this is due more to implementation history rather than being a matter
-of design.  In many places, the current implementation requires the construction of a
+of design.  In many places, the current implementation constructs a
 full-up object where the construction of a mere type would suffice.  
 
 In terms of user intent, both forms of initialized variable declaration (with and without
@@ -214,7 +221,7 @@ fully-establishing the type-default value in a variable that is then immediately
 There is further complexity surrounding whether a record type defines a constructor that
 can be called with no arguments.  In the example code above, it does.  So the initial value of
 a \chpl{type_temp} variable is determined by calling that user-defined no-argument
-constructor.  If such a user-defined constructor does not exist, the compiler instead
+constructor.  If such a user-defined constructor does not exist, the compiler
 inserts a call to \chpl{_defaultOf(t)}, where \chpl{t} is the type of that record.  The
 compiler-supplied version of \chpl{_defaultOf()} calls the all-fields constructor for the
 passed-in type, passing no arguments.  
@@ -227,29 +234,20 @@ In the case that no user-defined
 constructor that can bind to an empty argument list is supplied, the call would instead bind to
 the compiler-supplied all-fields constructor.  
 
-In the current implementation, it is possible to override the compiler-supplied version of
-\chpl{_defaultOf()}.  In that case, the user-defined version of \chpl{_defaultOf()} is
-used in preference to the compiler-provided version.
-However, it is still the case that \chpl{_defaultOf()} will only be called if there is no
-user-defined constructor for that type that can bind to an empty argument list.
-Part of this proposal is to change that behavior, as detailed here:
+In the current implementation, \chpl{_defaultOf(t:type)} is always called to
+produce a value that initializes a variable or field of type \chpl{t} that is
+declared without an explicit initializer.  The compiler-supplied version of
+\chpl{_defaultOf(t:type)} calls the zero-argument constructor for type \chpl{t}.
+It is possible to override the compiler-supplied version of \chpl{_defaultOf()}.
+In that case, the user-defined version of \chpl{_defaultOf()} is used in
+preference to the compiler-provided version.
 
-Because \chpl{_defaultOf()} produces an object that is properly initialized, it is
-equivalent in its effect to construction.  It should therefore be under the control of the
-author of that type.  Both \chpl{_defaultOf()} and the no-argument constructor for a given
-type have the meaning ``give me a default-initialized object of type T'', so at least in
-concept they are aliases for one another.  The two differences that exist in the current
-implementation are that the user-defined no-argument constructor will take precedence over
-\chpl{_defaultOf()} and that \chpl{_defaultOf()} bypasses any user-defined no-argument
-constructor (which doesn't exist, by definition), and calls the compiler-defined
-all-fields constructor (passing no arguments) instead.  
-
-A way to bring these concepts
-closer into alignment would be to have the compiler-supplied version of
-\chpl{_defaultOf()} for record types call a constructor of that type by name, passing no
-arguments.  This will bind with the compiler-supplied all-fields constructor (passing no
-arguments) if no user-defined no-argument constructor is supplied, and will bind to the
-user-defined version if one is present.
+THe compiler always supplies an all-fields constructor which supplies default
+values for every argument.  It is therefore callable as the zero-args
+constructor.  However, if the user supplies a constructor that is callable with
+zero arguments, that one will be called in preference to the compiler-supplied
+all-fields constructor.
+Thus, the user has two ways to override the behavior of \chpl{_defaultOf()}.
 
 \subsubsection{Class Variables}
 
@@ -305,7 +303,7 @@ which is roughly equivalent to the following pseudo-Chapel code:
 \end{chapel}
 \noindent
 For class variables, assignment is rigidly defined by the compiler to be a pointer copy,
-so there is no difference between the assignment operator and move primitives for all
+so there is no difference between the assignment operator and the move primitive for all
 class types.  Therefore, the actions taken for the separate declaration and initialization
 (for variable \chpl{c}) are the same as those taken for the canonical initialization form
 (for variable \chpl{d}).  In minute detail, the first form involves one update of
@@ -446,7 +444,7 @@ array of arbitrary shape and size, and so considerable work is done to build up 
 before it is handed off to the copy-constructor (here called \chpl{chpl__initCopy}) to be
 copied into the destination variable.  However, that is only a matter of appearance.  In
 fact, the type of the return value of \chpl{chpl__buildArrayExpr()} is known well before
-its execution commences.  (It is, in fact, known here by the end of resolution.)  Since
+its execution commences.  (It is, in fact, known by the end of resolution.)  Since
 the type of the resultant object is known, the call to the free function
 \chpl{chpl__buildArrayExpr()} could be replaced by a constructor call, and the call to the
 array's copy constructor thereby avoided.
@@ -466,7 +464,7 @@ list (lacking domain information) could be passed to an array whose type (or at 
 domain) had already been declared.  The same initializer syntax could thus be used to
 initialize arrays of arbitrary dimension or element type --- according to the rules set
 down by the construct corresponding to that domain type.  (I assume that \chpl{where}
-clauses can be used here for partial specialization.)  
+clauses can be used for partial specialization.)  
 
 An alternate approach suggested in
 the existing spec is to provide some syntax for specifying a domain as part of the literal.  
@@ -481,25 +479,25 @@ Since array support for the \chpl{noinit} initializer is not yet provided, the g
 cases \chpl{A} and \chpl{D} should be identical.  In fact, they differ because the
 initializer for \chpl{A} moves through a \chpl{type_tmp} variable and that for \chpl{D}
 does not.  The initializers are processed through two different code paths, but they end
-up in approximately the same place.  The paths are expected to diverge when \chpl{noinit}
+up in approximately the same place.  These paths are expected to diverge when \chpl{noinit}
 is implemented.
 
 The remainder of the code for these two cases first creates a domain expression and then
-passes this to \chpl{chpl__buildArrayRuntimeType()}.  That function primarily provides the
+passes this to \chpl{chpl__buildArrayRuntimeType()}.  That function provides the
 means for grafting the element type onto an existing domain.  An array constructor with a
 generic type argument can perform this grafting equally well.  Initialization is not
 performed when that array object is created.  The function as written is split, so the
-type can be computed first and initialization performed later
+type can be computed first and initialization performed later.
 
 The domain is then copied by reference into the array type.  This copy may be redundant,
-depending on how the constructor for the array type is defined.  However, it is just a
-pointer copy after all, so is relatively cheap.  Next,
+depending on how the constructor for the array type is defined.  However, this
+assignment is just a pointer copy, so is relatively cheap.  Next,
 \chpl{chpl__convertRuntimeTypeToValue} is called on the newly-created array type.  That
-function performs the initialization as originally written in the buildArrayRuntimeType
+function performs the initialization as originally written in the \chpl{buildArrayRuntimeType}
 function.
 
 From the results of resolution, it is evident that the type of an array is completely
-known after resolution.  The ``runtime type'' mechanism may help to manage type
+known after the resolution pass.  The ``runtime type'' mechanism may help to manage type
 information up to a point, but by the time the call to
 \chpl{chpl__convertRuntimeTypeToValue()} is called, the type of the array being initialized
 is fully known.  That suggests that the array initialization could be replaced by a
@@ -508,12 +506,12 @@ constructor call.
 
 The remaining case to consider is the initialization code for \chpl{C}.  The generated
 code is the same in every respect with that for \chpl{A} and \chpl{D}, except that the
-type-based initialization concludes with the autoCopy call.  The array literal is built by
+type-based initialization concludes with the \chpl{autoCopy} call.  The array literal is built by
 the call to \chpl{chpl__buildArrayExpr}, and this is followed by assignment to the
 \chpl{type_tmp}.  Finally, the \chpl{type_tmp} is assigned to the the named variable.  It
-gets the job done, but in a surprising and somewhat roundabout way.
+gets the job done, but in a somewhat roundabout way.
 
-The autoCopy to initialize the \chpl{type_tmp} is arguably correct.
+The \chpl{autoCopy} to initialize the \chpl{type_tmp} is arguably correct.
 If that much is done to establish the type of the array, then assignment is the correct
 choice for updating with values from the initializer.  Even so, since the type of the LHS
 is fully known by this point, a constructor that can accept the array literal as an
@@ -651,7 +649,7 @@ Except for the presence of a \chpl{type_tmp} for \chpl{a}, the cases for \chpl{a
 overwrites the initial value supplied by \chpl{_defaultOf}.  Both forms could be replaced
 by a suitable constructor call.
 
-The cases for single variables are symmetrical with sync variables, and the same comments
+The cases for \chpl{single} variables are symmetrical with sync variables, and the same comments
 apply.
 
 \subsubsection{Tuple Variables}
@@ -707,6 +705,7 @@ types.  As with other types, the forms of variable declaration are:
    var e = d; // Same.
 \end{chapel}
 \noindent
+%Is this statement still true?
 The third form is not currently supported for integer or real types, because the syntax
 type(size)() in a "new" expression is not recognized as a type expression followed by a
 call (which should invoke a constructor for that type).  The above code results in the
@@ -733,7 +732,7 @@ following AST:
 The first form results in default-initialization with a value of the declared type.
 Note that there is no initialization at all (in the AST) for the form
 involving \chpl{=noinit}.  Again, the canonical version contains extra data motion that
-is undesirable.  In particular, it uses assignment, which should not appear in initialization.
+is undesirable.  In particular, it uses assignment, \emph{which should not appear in initialization}.
 
 
 
@@ -954,7 +953,7 @@ performing default- and field-initialization, heap-allocates space to hold the r
 \subsubsection{Post-Construction}
 
 A currently-supported feature of the compiler is to insert a call to an \chpl{initialize}
-method at the end of a constructor if such a method is defined in the class.
+method at the end of a constructor if such a method is defined for the class.
 
 There are a number of reasons why this language feature should be deprecated, including:
 \begin{itemize}
@@ -1028,7 +1027,7 @@ methods would overwrite a zero-initialized variable (or field) what was thought 
 default-initialization is now moot.  (Refer to the second open issue in
 \rsec{Constructors_Syntax} for further discussion.)
 
-As hinted above, an explicit initializer will be used if present, otherwise
+As stated above, an explicit initializer will be used if present, otherwise
 \chpl{_defaultOf()} will be called to supply a default value.
 
 The assignment used to update a typed object with its initializer should be replaced with
@@ -1063,11 +1062,12 @@ We propose to deprecate and remove the magic surrounding the \chpl{initialize()}
 
 Assuming that all of the compiler-generated function classes mentioned above can be
 overridden in user code, the proposed behavior is the same as the existing behavior, with
-one exception.
+one exception:
 
-Currently, all-fields constructors remain visible unless they are specifically
-overridden.  We propose that the all-fields constructor for a given type be hidden if the
-definition of the corresponding type contains one or more explicitly-defined constructors.
+Currently, the all-fields constructor for a given type remains visible unless it
+is specifically overridden.  We propose that the all-fields constructor be
+hidden if the definition of the corresponding type contains one or more
+explicitly-defined constructors.
 
 The reason for allowing user-code to invoke the all-fields constructor at all is that it
 supports rapid prototyping.  Much of what would be done in an explicit constructor can be
