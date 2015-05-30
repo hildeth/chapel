@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -23,19 +23,28 @@
 #include "astutil.h"
 #include "bb.h"
 #include "expr.h"
+#include "ForLoop.h"
 #include "passes.h"
 #include "stlUtil.h"
 #include "stmt.h"
+#include "WhileStmt.h"
+#include "ForLoop.h"
 
 #include <queue>
 #include <set>
 
+typedef std::set<BasicBlock*> BasicBlockSet;
+
+static void deadBlockElimination(FnSymbol* fn);
+static void findReachableBlocks(FnSymbol* fn, BasicBlockSet& reachable);
+static void deleteUnreachableBlocks(FnSymbol* fn, BasicBlockSet& reachable);
 static bool         isInCForLoopHeader(Expr* expr);
-static void         deadBlockElimination(FnSymbol* fn);
 static void         cleanupLoopBlocks(FnSymbol* fn);
 
 static unsigned int deadBlockCount;
 static unsigned int deadModuleCount;
+
+
 
 //
 //
@@ -114,11 +123,11 @@ void deadVariableElimination(FnSymbol* fn) {
 // Removes expression statements that have no effect.
 //
 void deadExpressionElimination(FnSymbol* fn) {
-  Vec<BaseAST*> asts;
+  std::vector<BaseAST*> asts;
 
   collect_asts(fn, asts);
 
-  forv_Vec(BaseAST, ast, asts) {
+  for_vector(BaseAST, ast, asts) {
     Expr* exprAst = toExpr(ast);
 
     if (exprAst == 0) {
@@ -205,18 +214,18 @@ void deadCodeElimination(FnSymbol* fn) {
       Expr*         expr        = bb->exprs[i];
       bool          isEssential = bb->marks[i];
 
-      Vec<BaseAST*> asts;
+      std::vector<BaseAST*> asts;
 
       collect_asts(expr, asts);
 
-      forv_Vec(BaseAST, ast, asts) {
+      for_vector(BaseAST, ast, asts) {
         if (Expr* sub = toExpr(ast)) {
           exprMap[sub] = expr;
         }
       }
 
       if (isEssential == false) {
-        forv_Vec(BaseAST, ast, asts) {
+        for_vector(BaseAST, ast, asts) {
           if (CallExpr* call = toCallExpr(ast)) {
             // mark assignments to global variables as essential
             if (call->isPrimitive(PRIM_MOVE) || call->isPrimitive(PRIM_ASSIGN)) {
@@ -238,11 +247,11 @@ void deadCodeElimination(FnSymbol* fn) {
   }
 
   forv_Vec(Expr, expr, workSet) {
-    Vec<SymExpr*> symExprs;
+    std::vector<SymExpr*> symExprs;
 
     collectSymExprs(expr, symExprs);
 
-    forv_Vec(SymExpr, se, symExprs) {
+    for_vector(SymExpr, se, symExprs) {
       if (UD.count(se) != 0) {
         Vec<SymExpr*>* defs = UD[se];
 
@@ -328,12 +337,11 @@ static void deadModuleElimination() {
 
 void deadCodeElimination() {
   if (!fNoDeadCodeElimination) {
+    deadBlockElimination();
 
-    deadBlockCount  = 0;
     deadModuleCount = 0;
 
     forv_Vec(FnSymbol, fn, gFnSymbols) {
-      deadBlockElimination(fn);
 
       // 2014/10/17   Noakes and Elliot
       // Dead Block Elimination may convert valid loops to "malformed" loops.
@@ -355,26 +363,45 @@ void deadCodeElimination() {
 
     deadModuleElimination();
 
-    if (fReportDeadBlocks)
-      printf("\tRemoved %d dead blocks.\n", deadBlockCount);
-
     if (fReportDeadModules)
       printf("Removed %d dead modules.\n", deadModuleCount);
   }
 }
 
+void deadBlockElimination()
+{
+  deadBlockCount = 0;
+
+  forv_Vec(FnSymbol, fn, gFnSymbols)
+  {
+    if (!isAlive(fn))
+      continue;
+    deadBlockElimination(fn);
+  }
+
+  if (fReportDeadBlocks)
+    printf("\tRemoved %d dead blocks.\n", deadBlockCount);
+
+}
+
 // Look for and remove unreachable blocks.
-// Muchnick says we can enumerate the unreachable blocks first and then just
-// remove them.  We only need to do this once, because removal of an
-// unreachable block cannot possibly make any reachable block unreachable.
 static void deadBlockElimination(FnSymbol* fn)
 {
   // We need the basic block information to be correct, so recompute it.
   BasicBlock::buildBasicBlocks(fn);
 
   // Find the reachable basic blocks within this function.
-  std::set<BasicBlock*> reachable;
+  BasicBlockSet reachable;
 
+  findReachableBlocks(fn, reachable);
+  deleteUnreachableBlocks(fn, reachable);
+}
+
+// Muchnick says we can enumerate the unreachable blocks first and then just
+// remove them.  We only need to do this once, because removal of an
+// unreachable block cannot possibly make any reachable block unreachable.
+static void findReachableBlocks(FnSymbol* fn, BasicBlockSet& reachable)
+{
   // We set up a work queue to perform a BFS on reachable blocks, and seed it
   // with the first block in the function.
   std::queue<BasicBlock*> work_queue;
@@ -385,6 +412,7 @@ static void deadBlockElimination(FnSymbol* fn)
   {
     // Fetch and remove the next block.
     BasicBlock* bb = work_queue.front();
+
     work_queue.pop();
 
     // Ignore it if we've already seen it.
@@ -394,12 +422,15 @@ static void deadBlockElimination(FnSymbol* fn)
     // Otherwise, mark it as reachable, and append all of its successors to the
     // work queue.
     reachable.insert(bb);
+
     for_vector(BasicBlock, out, bb->outs)
       work_queue.push(out);
   }
+}
 
-  // Now we simply visit all the blocks, deleting all those that are not
-  // rechable.
+static void deleteUnreachableBlocks(FnSymbol* fn, BasicBlockSet& reachable)
+{
+  // Visit all the blocks, deleting all those that are not reachable
   for_vector(BasicBlock, bb, *fn->basicBlocks)
   {
     if (reachable.count(bb))
@@ -422,11 +453,28 @@ static void deadBlockElimination(FnSymbol* fn)
       if (toDefExpr(expr))
         continue;
 
-      CondStmt* cond = toCondStmt(expr->parentExpr);
-      if (cond && cond->condExpr == expr)
-        // If expr is the condition expression in an if statement,
-        // then remove the entire if.
-        cond->remove();
+      CondStmt*  condStmt  = toCondStmt(expr->parentExpr);
+      WhileStmt* whileStmt = toWhileStmt(expr->parentExpr);
+      ForLoop*   forLoop   = toForLoop(expr->parentExpr);
+
+      if (condStmt && condStmt->condExpr == expr)
+        // If the expr is the condition expression of an if statement,
+        // then remove the entire if. (NOTE 1)
+        condStmt->remove();
+
+      else if (whileStmt && whileStmt->condExprGet() == expr)
+        // If the expr is the condition expression of a while statement,
+        // then remove the entire While. (NOTE 1)
+        whileStmt->remove();
+
+      else if (forLoop   && forLoop->indexGet()      == expr)
+        // Do nothing. (NOTE 2)
+        ;
+
+      else if (forLoop   && forLoop->iteratorGet()   == expr)
+        // Do nothing. (NOTE 2)
+        ;
+
       else
         expr->remove();
     }
@@ -488,7 +536,7 @@ void verifyNcleanRemovedIterResumeGotos() {
 static void cleanupLoopBlocks(FnSymbol* fn) {
   std::vector<Expr*> stmts;
 
-  collect_stmts_STL(fn->body, stmts);
+  collect_stmts(fn->body, stmts);
 
   for_vector (Expr, expr, stmts) {
     if (BlockStmt* stmt = toBlockStmt(expr)) {
@@ -526,3 +574,22 @@ static void deadGotoElimination(FnSymbol* fn)
   }
 }
 #endif
+
+//########################################################################
+//# NOTES
+//#
+//# 1. This cleanup is not really part of dead block removal, but is necessary
+//#    to avoid leaving the AST in a malformed state.  A more-factored approach
+//#    would be to have a cleanup function that can be invoked on parts of the
+//#    tree to normalize AST constructs that have been partially eviscerated.
+//#
+//#    This particular traversal should probably be done in postorder.  Then,
+//#    the check at the top of the loop can be eliminated additional checks can
+//#    be added to ensure that when a construct is to be removed, all of its
+//#    constituent parts have already been removed from the tree.
+//#
+//# 2. Because the ForLoop construct contains initialization code, we cannot
+//#    necessarily remove the entire for loop when we discover that evaluation
+//#    of the iterator index is dead.  (It's probably a safer bet when the
+//#    iterator expression is dead.)
+//#

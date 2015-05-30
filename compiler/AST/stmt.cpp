@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -55,7 +55,7 @@ void codegenStmt(Expr* stmt) {
     }
 
     if (fGenIDS)
-      info->cStatements.push_back("/* " + numToString(stmt->id) + "*/ ");
+      info->cStatements.push_back("/* " + numToString(stmt->id) + " */ ");
   }
 
   ++gStmtCount;
@@ -89,8 +89,6 @@ BlockStmt::BlockStmt(Expr* initBody, BlockTag initBlockTag) :
   Stmt(E_BlockStmt),
   blockTag(initBlockTag),
   modUses(NULL),
-  breakLabel(NULL),
-  continueLabel(NULL),
   userLabel(NULL),
   byrefVars(NULL),
   blockInfo(NULL) {
@@ -144,12 +142,10 @@ BlockStmt*
 BlockStmt::copyInner(SymbolMap* map) {
   BlockStmt* _this = new BlockStmt();
 
-  _this->blockTag      = blockTag;
-  _this->blockInfo     = COPY_INT(blockInfo);
-  _this->modUses       = COPY_INT(modUses);
-  _this->breakLabel    = breakLabel;
-  _this->continueLabel = continueLabel;
-  _this->byrefVars     = COPY_INT(byrefVars);
+  _this->blockTag  = blockTag;
+  _this->blockInfo = COPY_INT(blockInfo);
+  _this->modUses   = COPY_INT(modUses);
+  _this->byrefVars = COPY_INT(byrefVars);
 
   for_alist(expr, body)
     _this->insertAtTail(COPY_INT(expr));
@@ -177,6 +173,10 @@ void BlockStmt::replaceChild(Expr* oldAst, Expr* newAst) {
 
   else
     INT_FATAL(this, "BlockStmt::replaceChild. Failed to match the oldAst ");
+
+  // TODO: Handle the above special cases uniformly by specializing the
+  // traversal of the children by block statement type.  I think blockInfo is
+  // being deprecated anyway....
 }
 
 CallExpr* BlockStmt::blockInfoGet() const {
@@ -291,8 +291,8 @@ Expr*
 BlockStmt::getFirstExpr() {
   Expr* retval = 0;
 
-  if (blockInfoGet() != 0)
-    retval = blockInfoGet()->getFirstExpr();
+  if (blockInfo != 0)
+    retval = blockInfo->getFirstExpr();
 
   else if (body.head      != 0)
     retval = body.head->getFirstExpr();
@@ -305,9 +305,9 @@ BlockStmt::getFirstExpr() {
 
 Expr*
 BlockStmt::getNextExpr(Expr* expr) {
-  Expr* retval = 0;
+  Expr* retval = this;
 
-  if (expr == blockInfoGet() && body.head != 0)
+  if (expr == blockInfo && body.head != 0)
     retval = body.head->getFirstExpr();
 
   return retval;
@@ -355,13 +355,23 @@ BlockStmt::insertAtTailBeforeGoto(Expr* ast) {
 
 
 bool
+BlockStmt::isRealBlockStmt() const {
+  return blockInfo == 0;
+}
+
+bool
 BlockStmt::isScopeless() const {
   return blockTag == BLOCK_SCOPELESS;
 }
 
 bool
-BlockStmt::isLoop() const {
-  return blockInfo && blockInfo->isPrimitive(PRIM_BLOCK_PARAM_LOOP);
+BlockStmt::isBlockType(PrimitiveTag tag) const {
+  return blockInfo != 0 && blockInfo->isPrimitive(tag) == true;
+}
+
+bool
+BlockStmt::isLoopStmt() const {
+  return false;
 }
 
 bool
@@ -380,7 +390,17 @@ BlockStmt::isDoWhileStmt() const {
 }
 
 bool
+BlockStmt::isParamForLoop() const {
+  return false;
+}
+
+bool
 BlockStmt::isForLoop() const {
+  return false;
+}
+
+bool
+BlockStmt::isCoforallLoop() const {
   return false;
 }
 
@@ -491,7 +511,7 @@ CondStmt::CondStmt(Expr* iCondExpr, BaseAST* iThenStmt, BaseAST* iElseStmt) :
   if (Expr* s = toExpr(iThenStmt)) {
     BlockStmt* bs = toBlockStmt(s);
 
-    if (bs && bs->blockTag == BLOCK_NORMAL && !bs->blockInfoGet())
+    if (bs && bs->blockTag == BLOCK_NORMAL && bs->isRealBlockStmt())
       thenStmt = bs;
     else
       thenStmt = new BlockStmt(s);
@@ -503,7 +523,7 @@ CondStmt::CondStmt(Expr* iCondExpr, BaseAST* iThenStmt, BaseAST* iElseStmt) :
     if (Expr* s = toExpr(iElseStmt)) {
       BlockStmt* bs = toBlockStmt(s);
 
-      if (bs && bs->blockTag == BLOCK_NORMAL && !bs->blockInfoGet())
+      if (bs && bs->blockTag == BLOCK_NORMAL && bs->isRealBlockStmt())
         elseStmt = bs;
       else
         elseStmt = new BlockStmt(s);
@@ -736,7 +756,7 @@ CondStmt::getFirstExpr() {
 
 Expr*
 CondStmt::getNextExpr(Expr* expr) {
-  Expr* retval = NULL;
+  Expr* retval = this;
 
   if (expr == condExpr && thenStmt != NULL)
     retval = thenStmt->getFirstExpr();

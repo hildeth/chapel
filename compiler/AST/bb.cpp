@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -71,7 +71,10 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn) {
 
   fn->basicBlocks->push_back(BasicBlock::steal());
 
-  INT_ASSERT(verifyBasicBlocks(fn));
+  removeEmptyBlocks(fn);
+
+  if (fVerify)
+    INT_ASSERT(verifyBasicBlocks(fn));
 }
 
 BasicBlock* BasicBlock::steal() {
@@ -86,13 +89,11 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
   if (stmt == 0) {
 
   } else if (BlockStmt* s = toBlockStmt(stmt)) {
-    if (s->isLoop() == true) {
+    if (s->isLoopStmt() == true) {
 
       // for c for loops, add the init expr before the loop body
       if (CForLoop* cforLoop = toCForLoop(s)) {
-        CallExpr* info = cforLoop->cforInfoGet();
-
-        for_alist(stmt, toBlockStmt(info->get(1))->body) {
+        for_alist(stmt, cforLoop->initBlockGet()->body) {
           buildBasicBlocks(fn, stmt, mark);
         }
       }
@@ -104,17 +105,13 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
 
       // Mark and add the test expr at the loop top
       if (CForLoop* cforLoop = toCForLoop(s)) {
-        CallExpr* info = cforLoop->cforInfoGet();
-
-        for_alist(stmt, toBlockStmt(info->get(2))->body) {
+        for_alist(stmt, cforLoop->testBlockGet()->body) {
           buildBasicBlocks(fn, stmt, true);
         }
 
       // add the condition expr at the loop top
       } else if (WhileDoStmt* whileDoStmt = toWhileDoStmt(stmt)) {
-        SymExpr* condExpr = whileDoStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
+        SymExpr* condExpr = whileDoStmt->condExprForTmpVariableGet();
 
         append(condExpr, true);
 
@@ -140,16 +137,12 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
 
       // for c for loops, add the incr expr after the loop body
       if (CForLoop* cforLoop = toCForLoop(s)) {
-        CallExpr* info = cforLoop->cforInfoGet();
-
-        for_alist(stmt, toBlockStmt(info->get(3))->body) {
+        for_alist(stmt, cforLoop->incrBlockGet()->body) {
           buildBasicBlocks(fn, stmt, mark);
         }
 
       } else if (DoWhileStmt* doWhileStmt = toDoWhileStmt(stmt)) {
-        SymExpr* condExpr = doWhileStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
+        SymExpr* condExpr = doWhileStmt->condExprForTmpVariableGet();
 
         append(condExpr, true);
       }
@@ -208,9 +201,11 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     LabelSymbol* label = toLabelSymbol(toSymExpr(s->label)->var);
 
     if (BasicBlock* bb = labelMaps.get(label)) {
+      // Thread this block to its destination label.
       thread(basicBlock, bb);
 
     } else {
+      // Set up goto map, so this block's successor can be back-patched later.
       std::vector<BasicBlock*>* vbb = gotoMaps.get(label);
 
       if (!vbb)
@@ -222,15 +217,19 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     }
 
     append(s, mark); // Put the goto at the end of its block.
+
+    // We need a new block, so we can not thread the one containing the goto to
+    // this new one.  There is a break in the flow.  If the new block does not
+    // begin with a label, it is unreachable and can be removed.
     restart(fn);
 
   } else {
     DefExpr*      def = toDefExpr(stmt);
-    Vec<BaseAST*> asts;
+    std::vector<BaseAST*> asts;
 
     collect_asts(stmt, asts);
 
-    forv_Vec(BaseAST, ast, asts) {
+    for_vector(BaseAST, ast, asts) {
       if (CallExpr* call = toCallExpr(ast)) {
         // mark function calls as essential
         if (call->isResolved() != NULL)
@@ -297,9 +296,49 @@ void BasicBlock::thread(BasicBlock* src, BasicBlock* dst) {
   src->outs.push_back(dst);
 }
 
+// Look for and remove empty blocks with no predecessor and whose successor is
+// the next block in sequence.  These blocks get created when a block ends in a
+// goto statement and the enclosing construct calls restart immediately.
+// We have to wait until basic block analysis is done, because we don't know if
+// a block has predecessors until after threading is performed, and this is
+// sometimes delayed.
+void BasicBlock::removeEmptyBlocks(FnSymbol* fn)
+{
+  // Create a new vector that contains just the items we want to preserve.
+  int new_id = 0;
+  BasicBlockVector* new_blocks = new BasicBlockVector();
+  for_vector(BasicBlock, bb, *fn->basicBlocks)
+  {
+    // Skip empty blocks with no predecessors.
+    if (bb->ins.size() == 0 &&
+        bb->exprs.size() == 0)
+    {
+      // This block will be removed.  It is no longer a predecessor of anyone,
+      // so we must update the back links.
+      for_vector(BasicBlock, succ, bb->outs)
+      {
+        BasicBlockVector::iterator i;
+        for (i = succ->ins.begin(); i != succ->ins.end(); ++i)
+          if (*i == bb)
+            break;
+
+        INT_ASSERT(i != succ->ins.end());
+        succ->ins.erase(i);
+      }
+    }
+    else
+    {
+      bb->id = new_id++;
+      new_blocks->push_back(bb);
+    }
+  }
+  delete fn->basicBlocks; fn->basicBlocks = new_blocks;
+}
+
 // Returns true if the basic block structure is OK, false otherwise.
 bool BasicBlock::verifyBasicBlocks(FnSymbol* fn) {
-  for_vector(BasicBlock, bb, *fn->basicBlocks) {
+  for_vector(BasicBlock, bb, *fn->basicBlocks)
+  {
     if (bb->isOK() == false)
       return false;
   }
@@ -311,6 +350,15 @@ bool BasicBlock::verifyBasicBlocks(FnSymbol* fn) {
 bool BasicBlock::isOK() {
   // Ensure exprs[] and marks[] are same length
   if (exprs.size() != marks.size())
+    return false;
+
+  // Every empty interior block must have a predecessor.
+  // Non-empty blocks with no predecessors are dead code, which may be
+  // removed by a client of BB analysis.  These dead blocks cannot be
+  // identified without BB analysis, so non-empty blocks with no
+  // predecessors are valid.
+  if (ins.size() == 0 &&
+      exprs.size() == 0)
     return false;
 
   // Expressions must be live (non-NULL);
@@ -383,7 +431,7 @@ void BasicBlock::backwardFlowAnalysis(FnSymbol*             fn,
     iterate = false;
 
     for_vector(BasicBlock, bb, *fn->basicBlocks) {
-      for (int j = 0; j < IN[i]->ndata; j++) {
+      for (size_t j = 0; j < IN[i]->ndata; j++) {
         unsigned int new_in  = (OUT[i]->data[j] & ~KILL[i]->data[j]) | GEN[i]->data[j];
         unsigned int new_out = 0;
 
@@ -446,7 +494,7 @@ void BasicBlock::forwardFlowAnalysis(FnSymbol*             fn,
     BasicBlock* bb     = (*fn->basicBlocks)[i];
     bool        change = false;
 
-    for (int j = 0; j < IN[i]->ndata; j++) {
+    for (size_t j = 0; j < IN[i]->ndata; j++) {
       if (bb->ins.size() > 0) {
         unsigned int new_in = (intersect) ? (unsigned int) (-1) : 0;
 
@@ -541,7 +589,7 @@ void BasicBlock::printLocalsVectorSets(std::vector<BitVec*>& sets, Vec<Symbol*> 
   for_vector(BitVec, set, sets) {
     printf("%2d: ", i);
 
-    for (int j = 0; j < set->size(); j++) {
+    for (size_t j = 0; j < set->size(); j++) {
       if (set->get(j))
         printf("%s[%d] ", locals.v[j]->name, locals.v[j]->id);
     }
@@ -560,7 +608,7 @@ void BasicBlock::printBitVectorSets(std::vector<BitVec*>& sets) {
   for_vector(BitVec, set, sets) {
     printf("%2d: ", i);
 
-    for (int j = 0; j < set->size(); j++) {
+    for (size_t j = 0; j < set->size(); j++) {
       printf("%d", (set->get(j)) ? 1 : 0);
       if ((j+1) % 10 == 0) printf(" ");
     }

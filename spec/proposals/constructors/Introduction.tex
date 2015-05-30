@@ -7,7 +7,7 @@ number of users by keeping memory leakage within practical bounds has forced the
 implementation to provide some means for reclaiming memory.  
 
 Since memory reclamation was not part of the original design, its implementation is somewhat
-ad hoc.  A review of the memory management elements in use in the Chapel compiler revealed
+ad hoc.  A review of the memory management in the Chapel compiler revealed
 that most of the necessary elements are present in some form.  But since these have not
 been applied uniformly across all types, memory is still leaked.
 

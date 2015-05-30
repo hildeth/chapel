@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -50,7 +50,6 @@ char               saveCDir[FILENAME_MAX + 1]           = "";
 
 char               ccflags[256]                         = "";
 char               ldflags[256]                         = "";
-bool               ccwarnings                           = false;
 
 int                numLibFlags                          = 0;
 const char**       libFlag                              = NULL;
@@ -101,35 +100,61 @@ static void removeSpacesFromString(char* str)
 }
 
 
+/*
+ * Find the default tmp directory. Try getting the tmp dir from the ISO/IEC
+ * 9945 env var options first, then P_tmpdir, then "/tmp".
+ */
+static const char* getTempDir() {
+  const char* possibleDirsInEnv[] = {"TMPDIR", "TMP", "TEMP", "TEMPDIR"};
+  for (unsigned int i = 0; i < (sizeof(possibleDirsInEnv) / sizeof(char*)); i++) {
+    const char* curDir = getenv(possibleDirsInEnv[i]);
+    if (curDir != NULL) {
+      return curDir;
+    }
+  }
+#ifdef P_tmpdir
+  return P_tmpdir;
+#else
+  return "/tmp";
+#endif
+}
+
+
+const char* makeTempDir(const char* dirPrefix) {
+  const char* tmpdirprefix = astr(getTempDir(), "/", dirPrefix);
+  const char* tmpdirsuffix = ".deleteme";
+
+  pid_t mypid = getpid();
+#ifdef DEBUGTMPDIR
+  mypid = 0;
+#endif
+
+  char mypidstr[MAX_CHARS_PER_PID];
+  snprintf(mypidstr, MAX_CHARS_PER_PID, "-%d", (int)mypid);
+
+  struct passwd* passwdinfo = getpwuid(geteuid());
+  const char* userid;
+  if (passwdinfo == NULL) {
+    userid = "anon";
+  } else {
+    userid = passwdinfo->pw_name;
+  }
+  char* myuserid = strdup(userid);
+  removeSpacesFromString(myuserid);
+
+  const char* tmpDir = astr(tmpdirprefix, myuserid, mypidstr, tmpdirsuffix);
+  ensureDirExists(tmpDir, "making temporary directory");
+
+  free(myuserid); myuserid = NULL;
+
+  return tmpDir;
+}
+
 static void ensureTmpDirExists() {
   if (saveCDir[0] == '\0') {
     if (tmpdirname == NULL) {
-      const char* tmpdirprefix = "/tmp/chpl-";
-      const char* tmpdirsuffix = ".deleteme";
-      
-      pid_t mypid = getpid();
-#ifdef DEBUGTMPDIR
-      mypid = 0;
-#endif
-      
-      char mypidstr[MAX_CHARS_PER_PID];
-      snprintf(mypidstr, MAX_CHARS_PER_PID, "-%d", (int)mypid);
-      
-      struct passwd* passwdinfo = getpwuid(geteuid());
-      const char* userid;
-      if (passwdinfo == NULL) {
-        userid = "anon";
-      } else {
-        userid = passwdinfo->pw_name;
-      }
-      char* myuserid = strdup(userid);
-      removeSpacesFromString(myuserid);
-
-      tmpdirname = astr(tmpdirprefix, myuserid, mypidstr, tmpdirsuffix);
+      tmpdirname = makeTempDir("chpl-");
       intDirName = tmpdirname;
-      ensureDirExists(intDirName, "making temporary directory");
-
-      free(myuserid); myuserid = NULL;
     }
   } else {
     if (intDirName != saveCDir) {
@@ -140,7 +165,13 @@ static void ensureTmpDirExists() {
 }
 
 
-void deleteTmpDir(void) {
+void deleteDir(const char* dirname) {
+  const char* cmd = astr("rm -rf ", dirname);
+  mysystem(cmd, astr("removing directory: ", dirname));
+}
+
+
+void deleteTmpDir() {
   static int inDeleteTmpDir = 0; // break infinite recursion
 
   if (inDeleteTmpDir) {
@@ -155,10 +186,7 @@ void deleteTmpDir(void) {
         strcmp(tmpdirname, "//") == 0) {
       INT_FATAL("tmp directory name looks fishy");
     }
-    const char* rmdircommand = "rm -r ";
-    const char* command = astr(rmdircommand, tmpdirname);
-
-    mysystem(command, "removing temporary directory");
+    deleteDir(tmpdirname);
     tmpdirname = NULL;
   }
 #endif
@@ -170,7 +198,7 @@ void deleteTmpDir(void) {
 const char* genIntermediateFilename(const char* filename) {
   const char* slash = "/";
 
-  ensureTmpDirExists();    
+  ensureTmpDirExists();
 
   return astr(intDirName, slash, filename);
 }
@@ -194,15 +222,18 @@ const char* objectFileForCFile(const char* inputFilename) {
   return objFilename;
 }
 
-static FILE* openfile(const char* filename, const char* mode = "w", 
-                      bool fatal = true) {
+static FILE* openfile(const char* filename,
+                      const char* mode  = "w",
+                      bool        fatal = true) {
   FILE* newfile;
 
   newfile = fopen(filename, mode);
+
   if (newfile == NULL) {
     const char* errorstr = "opening ";
-    const char* errormsg = astr(errorstr, filename, ": ", 
-                                     strerror(errno));
+    const char* errormsg = astr(errorstr,
+                                filename, ": ",
+                                strerror(errno));
 
     if (fatal) {
       USR_FATAL(errormsg);
@@ -248,16 +279,16 @@ void appendCFile(fileinfo* fi, const char* name, const char* ext) {
     fi->filename = astr(name, ".", ext);
   else
     fi->filename = astr(name);
-  
+
   fi->pathname = genIntermediateFilename(fi->filename);
-  fi->fptr = fopen(fi->pathname, "a+");
+  fi->fptr     = fopen(fi->pathname, "a+");
 }
+
 void closeCFile(fileinfo* fi, bool beautifyIt) {
   fclose(fi->fptr);
   if (beautifyIt && saveCDir[0])
     beautify(fi);
 }
-
 
 fileinfo* openTmpFile(const char* tmpfilename, const char* mode) {
   fileinfo* newfile = (fileinfo*)malloc(sizeof(fileinfo));
@@ -280,11 +311,12 @@ void closeInputFile(FILE* infile) {
 }
 
 
-static const char** inputFilenames = {NULL};
+static const char** inputFilenames = NULL;
 
 
 static bool checkSuffix(const char* filename, const char* suffix) {
   const char* dot = strrchr(filename, '.');
+
   return (dot && strcmp(dot+1, suffix) == 0);
 }
 
@@ -309,7 +341,7 @@ bool isChplSource(const char* filename) {
   return retval;
 }
 
-static bool isRecognizedSource(char* filename) {
+static bool isRecognizedSource(const char* filename) {
   return (isCSource(filename) ||
           isCHeader(filename) ||
           isObjFile(filename) ||
@@ -317,31 +349,44 @@ static bool isRecognizedSource(char* filename) {
 }
 
 
-void testInputFiles(int numFilenames, char* filename[]) {
-  inputFilenames = (const char**)malloc((numFilenames+1)*sizeof(char*));
-  int i;
+void addSourceFiles(int numNewFilenames, const char* filename[]) {
+  static int numInputFiles = 0;
+  int cursor = numInputFiles;
   char achar;
-  for (i=0; i<numFilenames; i++) {
+  numInputFiles += numNewFilenames;
+  inputFilenames = (const char**)realloc(inputFilenames, 
+                                         (numInputFiles+1)*sizeof(char*));
+
+  for (int i = 0; i < numNewFilenames; i++, cursor++) {
     if (!isRecognizedSource(filename[i])) {
-      USR_FATAL(astr("file '", filename[i], 
-                          "' does not have a recognized suffix"));
+      USR_FATAL(astr("file '",
+                     filename[i],
+                     "' does not have a recognized suffix"));
     }
     // WE SHOULDN"T TRY TO OPEN .h files, just .c and .chpl and .o
     if (!isCHeader(filename[i])) {
       FILE* testfile = openInputFile(filename[i]);
       if (fscanf(testfile, "%c", &achar) != 1) {
-        USR_FATAL(astr("source file '", filename[i], 
+        USR_FATAL(astr("source file '",
+                       filename[i],
                        "' is either empty or a directory"));
       }
-      
+
       closeInputFile(testfile);
     }
-    inputFilenames[i] = astr(filename[i]);
-  }
-  inputFilenames[i] = NULL;
 
-  if (!foundChplSource)
+    inputFilenames[cursor] = astr(filename[i]);
+  }
+
+  inputFilenames[cursor] = NULL;
+
+  if (!foundChplSource && fUseIPE == false)
     USR_FATAL("Command line contains no .chpl source files");
+}
+
+void addSourceFile(const char* filename) {
+  const char* filenamearr[1] = {filename};
+  addSourceFiles(1, filenamearr);
 }
 
 
@@ -507,24 +552,14 @@ void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_com
   // factor of 5 or so in time in running the test system, as opposed
   // to specifying BINNAME on the C compiler command line.
 
-  fprintf(makefile.fptr, "COMP_GEN_CFLAGS =");
-  if (ccwarnings) {
-    fprintf(makefile.fptr, " $(WARN_GEN_CFLAGS)");
-  }
-  if (debugCCode) {
-    fprintf(makefile.fptr, " $(DEBUG_CFLAGS)");
-  }
-  if (optimizeCCode) {
-    fprintf(makefile.fptr, " $(OPT_CFLAGS)");
-  }
-  if (specializeCCode) {
-    fprintf(makefile.fptr, " $(SPECIALIZE_CFLAGS)");
-  }
-  if (fieeefloat) {
-    fprintf(makefile.fptr, " $(IEEE_FLOAT_GEN_CFLAGS)");
-  } else {
-    fprintf(makefile.fptr, " $(NO_IEEE_FLOAT_GEN_CFLAGS)");
-  }
+  fprintf(makefile.fptr, "COMP_GEN_WARN = %i\n", ccwarnings!=0);
+  fprintf(makefile.fptr, "COMP_GEN_DEBUG = %i\n", debugCCode!=0);
+  fprintf(makefile.fptr, "COMP_GEN_OPT = %i\n", optimizeCCode!=0);
+  fprintf(makefile.fptr, "COMP_GEN_SPECIALIZE = %i\n", specializeCCode!=0);
+  fprintf(makefile.fptr, "COMP_GEN_IEEE_FLOAT = %i\n", fieeefloat!=0);
+  
+  fprintf(makefile.fptr, "COMP_GEN_USER_CFLAGS =");
+
   if (fLibraryCompile && (fLinkStyle==LS_DYNAMIC))
     fprintf(makefile.fptr, " $(SHARED_LIB_CFLAGS)");
   forv_Vec(const char*, dirName, incDirs) {
@@ -608,8 +643,9 @@ static const char* searchPath(Vec<const char*> path, const char* filename,
       if (foundfile == NULL) {
         foundfile = fullfilename;
       } else if (!noWarn) {
-        USR_WARN("Ambiguous module source file -- using %s over %s", 
-                 cleanFilename(foundfile), cleanFilename(fullfilename));
+        USR_WARN("Ambiguous module source file -- using %s over %s",
+                 cleanFilename(foundfile),
+                 cleanFilename(fullfilename));
       }
     }
   }
@@ -658,39 +694,53 @@ void addFlagModulePath(const char* newpath) {
 // search path, we'll add all unique directories specified via -M and
 // CHPL_MODULE_PATH.
 //
-void addDashMsToUserPath(void) {
+void addDashMsToUserPath() {
   forv_Vec(const char*, dirname, flagModPath) {
     addUsrDirToModulePath(dirname);
   }
 }
 
 
-void setupModulePaths(void) {
-  const char* modulesRoot = (fMinimalModules ? "modules-minimal" : "modules");
+void setupModulePaths() {
+  const char* modulesRoot = 0;
+
+  if (fMinimalModules == true)
+    modulesRoot = "modules-minimal";
+
+  else if (fUseIPE == true)
+    modulesRoot = "modules-ipe";
+
+  else
+    modulesRoot = "modules";
 
   intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/localeModels/",
                       CHPL_LOCALE_MODEL));
   intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/tasktable/",
                       fEnableTaskTracking ? "on" : "off"));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/threads/", 
+  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/threads/",
                       CHPL_THREADS));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/tasks/", 
+  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/tasks/",
                       CHPL_TASKS));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/comm/", 
+  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/comm/",
                       CHPL_COMM));
   intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal"));
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/standard/gen/", 
+
+  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/standard/gen/",
                       CHPL_TARGET_PLATFORM,
                       "-", CHPL_TARGET_COMPILER));
+
   stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/standard"));
   stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/layouts"));
   stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/dists"));
   stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/dists/dims"));
+
   const char* envvarpath = getenv("CHPL_MODULE_PATH");
+
   if (envvarpath) {
     char path[FILENAME_MAX+1];
     strncpy(path, envvarpath, FILENAME_MAX);
     char* colon = NULL;
+
     do {
       char* start = colon ? colon+1 : path;
       colon = strchr(start, ':');
@@ -717,8 +767,9 @@ void addModulePathFromFilename(const char* origfilename) {
 }
 
 
-const char* modNameToFilename(const char* modName, bool isInternal, 
-                              bool* isStandard) {
+const char* modNameToFilename(const char* modName,
+                              bool        isInternal,
+                              bool*       isStandard) {
   const char* filename = astr(modName, ".chpl");
   const char* fullfilename;
   if (isInternal) {
@@ -732,14 +783,49 @@ const char* modNameToFilename(const char* modName, bool isInternal,
 }
 
 const char* stdModNameToFilename(const char* modName) {
-  const char* fullfilename = searchPath(stdModPath, astr(modName, ".chpl"), 
+  const char* fullfilename = searchPath(stdModPath,
+                                        astr(modName, ".chpl"),
                                         NULL);
+
   if (fullfilename == NULL) {
     USR_FATAL("Can't find standard module '%s'\n", modName);
   }
+
   return fullfilename;
 }
 
+const char* filenameToModulename(const char* filename) {
+  const char* moduleName = astr(filename);
+  const char* firstSlash = strrchr(moduleName, '/');
+
+  if (firstSlash) {
+    moduleName = firstSlash + 1;
+  }
+
+  return asubstr(moduleName, strrchr(moduleName, '.'));
+}
+
+//
+// Return a fully qualified path name for the internal file with the specified baseName
+//
+
+const char* pathNameForInternalFile(const char* baseName) {
+  const char* fileName = astr(baseName, ".chpl");
+
+  return searchPath(intModPath, fileName, NULL, true);
+}
+
+//
+// Return a fully qualified path name for the standard file with the specified baseName
+// Generate a warning if there is a user file that might define the same module
+//
+
+const char* pathNameForStandardFile(const char* baseName) {
+  const char* fileName     = astr(baseName, ".chpl");
+  const char* userFileName = searchPath(usrModPath, fileName, NULL, false);
+
+  return searchPath(stdModPath, fileName, userFileName, false);
+}
 
 static void helpPrintPath(Vec<const char*> path) {
   forv_Vec(const char*, dirname, path) {
@@ -747,7 +833,7 @@ static void helpPrintPath(Vec<const char*> path) {
   }
 }
 
-void printModuleSearchPath(void) {
+void printModuleSearchPath() {
   fprintf(stderr, "module search dirs:\n");
   if (developer) {
     helpPrintPath(intModPath);
@@ -837,15 +923,15 @@ static int sys_getcwd(char** path_out)
 
   buf = (char*) malloc(sz);
   if( !buf ) return ENOMEM;
-  
+
   while( 1 ) {
     if ( getcwd(buf, sz) != NULL ) {
       break;
-      
+
     } else if ( errno == ERANGE ) {
       // keep looping but with bigger buffer.
       sz *= 2;
-      
+
       /*
        * Realloc may return NULL, in which case we will need to free the memory
        * initially pointed to by buf.  This is why we store the result of the
@@ -853,15 +939,15 @@ static int sys_getcwd(char** path_out)
        * returned we update the buf pointer.
        */
       void* newP = realloc(buf, sz);
-      
+
       if (newP != NULL) {
         buf = static_cast<char*>(newP);
-      
+
       } else {
         free(buf);
         return ENOMEM;
       }
-      
+
     } else {
       // Other error, stop.
       free(buf);
@@ -872,6 +958,21 @@ static int sys_getcwd(char** path_out)
   *path_out = buf;
   return 0;
 }
+
+
+/*
+ * Returns the current working directory. Does not report failures. Use
+ * sys_getcwd() if you need error reports.
+ */
+const char* getCwd() {
+  const char* result = getcwd(NULL, PATH_MAX);
+  if (result) {
+    return result;
+  } else {
+    return "";
+  }
+}
+
 
 // Find the path to the running program
 // (or return NULL if we couldn't figure it out).
@@ -937,7 +1038,7 @@ char* findProgramPath(const char *argv0)
     end = strchr(start, ':');
     if( end == NULL ) end = path_end;
     else end[0] = '\0'; // replace ':' with '\0'
-  
+
     real = dirHasFile(start, argv0);
     if( real ) break;
 
@@ -965,7 +1066,7 @@ bool isSameFile(const char* pathA, const char* pathB)
   rc = stat(pathB, &statsB);
   if( rc != 0 ) return false;
 
-  // is the inode the same? 
+  // is the inode the same?
   if( statsA.st_dev == statsB.st_dev &&
       statsA.st_ino == statsB.st_ino ) {
     return true;
@@ -973,4 +1074,3 @@ bool isSameFile(const char* pathA, const char* pathB)
 
   return false;
 }
-

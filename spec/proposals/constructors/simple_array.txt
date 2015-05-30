@@ -1,0 +1,160 @@
+This is a sketch of simple array type possessing the ability to:
+  - Specify element type and size
+  - Allocate the data.
+  - Zero- (i.e. default-) initialize the data in parallel, and
+  - Optionally noinit-initialize the data instead.
+
+
+REQUIREMENTS
+ 1. Following initialization, it must be possible to update an element by assignment.
+ 2. It must be possible to implement array initialization using a parallel traverstal.
+ 3. Element-by-element initialization is controlled by the "noinit" initializer.
+
+
+OBSERVATIONS
+ - In the constructor story presented, the actions taken in response to a "noinit"
+   initializer are under the control of the defining type, as specified in its "ntor"
+   constructor.  If an object of that type is not assignable after ntor initialization, it
+   is a coding error.  Therefore, all that is required to create an array the is
+   noinit-initialized is to call the ntor constructor on each element.
+ - For several fundamental types (such as "real"), the (most likely built-in) ntor
+   implementation would do nothing.  It would inline to a no-op.
+ - A suitably smart optimizer can observe that a parallel kernel that is empty (or more
+   generally contains only reads) is moot.  Under those conditions, the entire parallel
+   iteration may be removed and replaced by a no-op.
+ - The manipulation of raw data pointers (_ddata) does not really lie within the language,
+   so restrictions that would normally apply to an object w.r.t. calling its ctor or ntor
+   initializer do not apply in this case.  This allows us to separate the allocation from
+   the initialization of the elements of an array.
+
+
+SKETCH
+  record simple_array{
+    type eltType;
+    param size : int;
+    var data : _ddata(eltType);
+
+    ctor(type eltType, param size:int)
+    with (eltType = eltType, size = size,
+          data = _ddata_allocate(eltType, size)) // (0)
+    { initialize(true); }
+
+    ntor(type eltType, param size:int)
+    with (eltType = eltType, size = size,
+          data = _ddata_allocate(eltType, size)) // (0)
+    { initialize(false); }
+
+    proc initialize(param default_initialize = true) {
+      forall i in [0..#size] do
+        if default_initialize then
+          pragma "allow reinitialization"
+          data(i).ctor();  // (1)
+        else
+          pragma "allow reinitialization"
+          data(i).ntor();  // (2)
+    }
+
+    // (3)
+    proc this(idx: int) ref {
+      return data(idx);
+    }
+  }
+
+  // (4)
+  inline proc _ddata_allocate(type eltType, size: integral) {
+    var ret:_ddata(eltType);
+    __primitive("array_alloc", ret, eltType, size);
+    return ret;
+  }
+
+  var A : simple_array(real, 29); // (5)
+  var B : simple_array(imag, 29) = noinit; // (6)  
+
+NOTES
+(0) To save some typing, one could leave mention of the "data" field out of the "with"
+    clause.  It will then be default-initialized to nil.  The call to _ddata_allocate() can
+    then be placed in initialize().
+(1) This syntax calls the element type's zero-argument constructor as a method:
+      data(i).ctor()
+(2) This syntax calls the element type's noinit constructor as a method:
+      data(i).ntor()
+(3) By the time this() can be called with an object of the simple_array type, every
+    element has either been default-initialized or noinit-initialized.
+(4) _ddata_allocate() is like the current version, except that element initialization has
+    been removed.
+(5) This calls the constructor for simple_array(real) as a method, passing zero arguments:
+      A.ctor()
+(6) This calls the noinit-constructor for simple_array(imag) as a method:
+      B.ntor()
+
+
+DISCUSSION
+
+Requirement 1 is fulfilled, because array initialization causes every element in the array
+to be either default-initialized or zero-initialized.  We assume that a noinit-initialized
+element may be overwritten through assignment.  This is an implicit requirement imposed on
+any type that is used as an element type in simple_array.
+
+If the element type is real, for example, a write to the element is legal whether it
+has been default-initialized or noinit-initialized.  In either case, the element is
+just overwritten with the new value.  If the array has been default-initialized, then
+a read from an element will yield the default value (0.0).  If the array has been
+noinit-initialized, a read from an element will yield an unpredictable value.
+
+If the element is more complex -- a string-record, perhaps -- noinit-initialization must
+at least bring it to a point where assignment will not cause problems.  If the string_rec
+contains a field of class type, it probably suffices to initialize it to "nil" and then
+supply checks within the methods of the class to perform a null pointer check before
+accessing the contained data.  In assignment, the data of the LHS is freed before being
+overwritten by the data pointer from the RHS.  In a noinit-initialized string_rec, the ref
+count will go to zero and an attempt will be made to free the nil pointer.  This operation
+succeeds vacuously (without reporting an error).
+
+
+As for Requirement 2, it appears there is no impediment to initializing the elements in
+parallel.  The example shows that all of the memory is allocated as a block, so it
+naturally lies within a locally-accessible address space.  I assume that NUMA effects are
+associated with actual accesses within that allocation and not with the creation of that
+allocation.  I think this has more to do with the properties of the allocator.  Otherwise,
+it would be necessary to break up the array and allocate in piecemeal in address segments
+associated with each NUMA domain.  That is certainly possible, but it does not fit within
+this simple example.
+
+
+It can easily be seen that Requirement 3 is met in this case.  For more complex array
+types, it will most likely be necessary to pass a param bool flag (like the
+default_initialize flag show here) down through several levels of array initialization
+calls before it participates in the choice between default- vs. noinit-initialization.
+
+
+OPTIMIZATIONS
+
+The actions taken in the default-constructor and noinit-constructor for an array can be
+refined based on the element type.  So before the compiler is sophisticated enough to
+squash pointless parallel loop, we can determine from well-known element types that
+element-by-element noinit initialization would have no effect and therefore avoid it
+entirely:
+
+    proc initialize(param default_initialize = true) {
+      if ! default_initialize && isNumericType(eltType) then return;
+      ...
+    }
+
+We might also be able to apply the same kind of optimization use to avoid
+element-by-element copies in the bulkCopyRecords() optimization.  It is applied to records
+that exhibit "plain-old data" properties w.r.t. memory management.  POD records can be
+overwritten with a simple bitwise copy, so they behave similarly to all of built-in scalar
+types (bools, ints, reals, etc.).  No harm is done by leaving their bits unwritten after
+data of those types has been allocated.  There is still the danger of reading out garbage
+values, but that falls under the implied contract when using "noinit".
+
+While reviewing the code for distributed arrays, I observed that it would be possible (in
+the noinit case) to defer the *allocation* of the local pieces of an array as well as
+their *initialization*.  For the price of a few extra nil checks at run time, one could
+build a distributed array that only occupies header information after it has been
+initialized.  An attempt to read from a local array in this state would return the default
+value for that element type, thus fooling the reader into thinking that it was all
+allocated and initialized.  Actual initialization would only happen when an attempt was
+made to write a value into that local array.  This design would have the very nice
+property that a local array would only occupy space if a value deviating from the default
+were written into it.

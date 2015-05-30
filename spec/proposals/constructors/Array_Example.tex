@@ -1,0 +1,378 @@
+\section{Deferred Array Initialization}
+
+In the body this design document, the proposed support for a \chpl{noinit} initializer
+leaves it up to the type designer to define what ``noinit'' initialization means and the
+steps that must be taken to move an object from the ``noinit'' state into a
+fully-initialized state.
+
+However, since the \chpl{noinit} feature was proposed specifically with array
+initialization in mind, Additional detail should be provided to show that the general
+feature can be used to implement an array type that exhibits the specific behavior that
+was originally envisioned.
+
+The noinit feature was intended to reduce the cost of creating an array, by avoiding
+element-by-element initialization in cases where the algorithm immediately fills the array
+with valid values from another source.  In that case, the default-initialization of the
+elements is wasted effort, and only the algorithm designer really knows this.  It is
+possible that an optimizer could identify and remove useless default-initializations.  But
+providing explicit means to disable this default-initialization is important for three
+reasons:
+\begin{enumerate}
+\item That optimization has not yet been implemented;
+\item Even if it were, some cases might slip through; and
+\item Most likely, the optimization would not be able to track default-initializations
+  that crossed function calls.
+\end{enumerate}
+
+A second requirement that has emerged more recently is to ensure that when initialization is
+complete, it will be done in a manner that takes advantage of localized caching in the
+memory hierarchy.  Whereas addresses in main memory may be treated uniformly within a
+computer node, the cache assignment of a block of memory may be determined by when it is
+first written.  Therefore, ideally, the initialization of a segment of a distributed array
+should be done through the same processors as will be used in accessing that data
+later.\footnote{This assumes that the distribution of the array conforms to some
+  notion of locality expressed by or used by the algorithm being run.}
+
+Basically, we wish to defer initialization of the elements of an array until the traversal
+is made that writes their true initial values.  Depending on whether mere allocation is
+considered an access by the caching system, we may also desire to defer allocation of an
+array segment until some attempt is made to initialize it.  This strategy should fulfill both
+requirements.
+
+\subsection{Observations}
+
+An element of the design for the general ``noinit'' feature is that the definition of the
+noinit-initialized state of an object is left to the designer of that type.  To stay
+within the bounds of this design, the only control an array implementation has over
+element-by-element initialization (at the point in time that the array is populated) is
+whether the \chpl{noinit} flag is passed to the constructor for each element.  
+
+No-initialization and default-initialization are not the only options.  If
+\begin{chapel}
+var x = new T(...);
+\end{chapel}
+is the general Chapel idiom for creating an object \chpl{x} of type \chpl{T} and
+initializing it by calling a constructor of \chpl{T} passing in the arguments of the
+apparent constructor call.  The \chpl{=} here does not represent assignment.  Therefore,
+if the type of an array can be represented abstractly, we can invoke an array constructor and
+pass in arbitrary arguments.  That would effectively enable complete generality in how
+arrays are initialized.  Selecting useful ones from among these and elevating to the
+language level through the addition of syntactical sugar lies outside the scope of this
+discussion.
+
+Default-initialization of the elements of an array at declaration time requires that the
+entire array be allocated and then the element-by-element initialization performed.
+As hinted at above, ``noinit'' initialization can avoid not only the element-by-element
+initialization but also allocation required to support it.
+
+However, deferred initialization can be performed even if \chpl{noinit} is not specified,
+and the expected semantics of the language preserved.  It is only necessary to store in
+the representation of the array, perhaps at several levels, sufficient state information
+to determine whether a local section or an element thereof has been initialized.  The
+implementation of the array as an ADT can hide the details of the allocation and
+initialization.  Up to the point that a value is explicitly stored in a give location, the
+implementation can respond ``as if'' the allocation and initialization had been done, but
+without performing either of those actions in fact.
+
+\subsection{An Example Design}
+
+Given those observations, it seems reasonable to implement deferred
+allocation-and-initialization at the granularity of the local subarray, whether or not the
+\chpl{noinit} keyword is supplied as the initializer-expression for the array as a whole.
+The implementation only needs to arrange that the \chpl{noinit} specifier be propagated to
+the subarrays at the point in time that they are allocated, to control the
+element-by-element initialization.
+
+For the example design to be complete, we have to describe what we expect the behavior to
+be when reading from and writing to an element in an array, for the two cases where the
+\chpl{noinit} initializer is specified and not.  The behavior includes both the functional
+semantics -- being effects observable within the program itself -- and underlying behaviors
+that mostly affect performance.
+
+Most of this can be demonstrated through the implementation of element access functions
+(read and write).  But to demonstrate that the NUMA performance requirements are met, we
+also have to show some detail of how iteration may proceed over both noinit-initialized
+and default-initialized arrays.
+
+\subsection{Example Code}
+
+This section give example code for the implementation of an array type supporting the
+\chpl{noinit} initializer.  Commentary is inserted between the code sections, to explain
+their expected behavior and how they conform to the design requirements.
+
+\begin{note}
+This example uses the latest syntax for implementing the semantics of \chpl{noinit}
+initialization using a specialized constructor as presented at the deep-dive.  This new
+syntax has not yet been back-patched into the main document.
+\end{note}
+
+A number of simplifications are made in comparison with the existing implmentation:
+\begin{itemize}
+\item Array aliases and reference counting is not supported.
+\item Privatization is not supported.
+\item Bulk copying of array elements is not supported.
+\item Remote value forwarding is not supported.
+\item Shifted indexing is not supported.
+\end{itemize}
+
+
+\subsubsection{Array Default Construction}
+
+Given:
+\begin{chapel}
+confi const n = 10;
+var D = {1..n};
+\end{chapel}
+\noindent
+the three declarations
+\begin{chapel}
+var A: [D] real;
+var B: [D] real = noinit;
+var C: [D] real = 3.1416;
+\end{chapel}
+\noindent
+will be linked by the compiler to three different array constructor calls.  The first will
+follow the existing path for array construction by calling the zero-args constructor; the
+second will call the noinit constructor; the third will call an overloaded version of the
+constructor that accepts a constant initializer value.
+
+In the current implementation, the array constructor called by the compiler through the
+call chain \chpl{chpl__buildArrayRuntimeType()} --> \chpl{_domain.buildArray(eltType)}
+--> \chpl{dom.dsiBuildArray(eltType)}.  The implementation for
+\chpl{DefaultRectangularDom.dsiBuildArray} currently looks like:
+\begin{chapel}
+    proc DefaultRectangularDom.dsiBuildArray(type eltType) {
+      return new DefaultRectangularArr(eltType=eltType, rank=rank, idxType=idxType,
+                                      stridable=stridable, dom=this);
+    }
+\end{chapel}
+
+To support the \chpl{noinit} feature, it is probably simplest to add a flag that is passed
+down through the call chain to the point where the array constructor is actually called.
+To also support initialization to a particular value, we can consider passing along an
+initializer value.  At some point in the call chain, a default value can be computed from
+the \chpl{eltType}; from there on down, the default value would be passed along verbatim.
+To incorporate the two new ways of initializing arrays, the above constructor call would
+be modified to read as follows:
+\begin{chapel}
+    proc DefaultRectangularDom.dsiBuildArray(type eltType, isNoinit, initVal) {
+      if isNoinit then
+        return new DefaultRectangularArr.ntor(eltType=eltType, rank=rank, idxType=idxType,
+                                              stridable=stridable, dom=this, initVal=initVal);
+      else
+        return new DefaultRectangularArr(eltType=eltType, rank=rank, idxType=idxType,
+                                         stridable=stridable, dom=this);
+    }
+\end{chapel}
+It is important to note that we need some syntax for calling the noinit constructor under
+program control.   The compiler must therfore recognize the noinit constructor \chpl{ntor}
+as a method of the class or record and provide a name that can be used to invoke it.
+
+Moving back up the call chain, we would have:
+\begin{chapel}
+    proc _domain.buildArray(type eltType, isNoinit, initVal) {
+      return _value.dsiBuildArray(eltType, isNoinit, initVal);
+    }
+
+  pragma "runtime type init fn"
+  proc chpl__buildArrayRuntimeType(dom: domain, type eltType, 
+                                   isNoinit = false, initVal = _defaultOf(eltType))
+    return dom.buildArray(eltType, isNoinit, initVal);
+\end{chapel}
+Since \chpl{chpl__buildArrayRuntimeType()} is called by the compiler, we put the default
+values for \chpl{isNoinit} and \chpl{initVal} in its definition, so we can leverage the
+compiler's support for default arguments.  Other than that, there is no magic involved: we
+simply pass initialization parameters down the call chain to the place where they can be
+used.
+
+Now let us examine how a normally-initialized DefaultRectangularArray would be
+constructed.  Currently, only the compiler-supplied all-fields constructor is used.
+Therefore, we need to look at the declaration for the class to compose an explicit
+constructor that will do the same thing.
+\begin{chapel}
+  class DefaultRectangularArr : BaseArr {
+    type eltType;
+    param rank : int;
+    type idxType;
+    param stridable: bool;
+  
+    var dom : DefaultRectangularDom(rank=rank, idxType=idxType,
+                                           stridable=stridable);
+    var off: rank*idxType;
+    var blk: rank*idxType;
+    var str: rank*chpl__signedType(idxType);
+    var origin: idxType;
+    var factoredOffs: idxType;
+    var data : _ddata(eltType);
+    var noinit_data: bool = false;
+\end{chapel}
+We must also take into consideration the \chpl{initialize()} function.  It is called
+implicitly by the compiler currently.  Support going forward can be obtaind by calling it
+explicitly instead.  We will pull out the noinit\_data test, as this is precisely the
+choice we want to make for default- versus noinit-construction.
+\begin{chapel}
+    proc initialize() {
+      for param dim in 1..rank {
+        off(dim) = dom.dsiDim(dim).alignedLow;
+        str(dim) = dom.dsiDim(dim).stride;
+      }
+      blk(rank) = 1:idxType;
+      for param dim in 1..(rank-1) by -1 do
+        blk(dim) = blk(dim+1) * dom.dsiDim(dim+1).length;
+      computeFactoredOffs();
+      var size = blk(1) * dom.dsiDim(1).length;
+      data = _ddata_allocate(eltType, size, initVal);
+    }
+\end{chapel}
+\noindent
+When initialization takes place, the passed-in initial value is passed along to
+\chpl{_ddata_allocate}, so it can use that to initialize elements.  The definition of
+\chpl{_ddata_allocate} is modified accordingly.
+\begin{chapel}
+  inline proc _ddata_allocate(type eltType, size: integral) {
+    var ret:_ddata(eltType);
+    __primitive("array_alloc", ret, eltType, size);
+    init_elts(ret, size, eltType);
+    return ret;
+  }
+
+  proc init_elts(x, s, type t, initVal) {
+    for i in 1..s {
+      pragma "no auto destroy" var y: t = initVal;
+      __primitive("array_set_first", x, i-1, y);
+    }
+  }
+\end{chapel}
+
+After the preliminaries, we are able to write:
+\begin{chapel}
+  ctor DefaultRectangularArr(type eltType, param rank:int,
+                             type idxType, stridable:bool,
+                             dom, initVal)
+  with (eltType=eltType, rank=rank, idxType=idxType,
+        stridable=stridable, dom=dom, initVal=initVal)
+  {
+    initialize();
+  }
+\end{chapel}
+To the class, we will have to add one field, to store \chpl{initVal}.  The field
+\chpl{noinit_data} can be removed, as it is no longer needed.  Being class variables, the
+ddata fiels used to store the array valueswill not be allocated until initialize() is called.  The
+types of all of the fields following \chpl{dom} up to and including \chpl{data} are
+established when the generic DefaultRectangularArr type is instantiated during
+resolution.  They are not mentioned in the initializer-list, since we can accept their
+default-initialized values.  There is no particular reason to force any of them to remain
+uninitialized, unless it happened that the chosen \chpl{idxType} were expensive to
+initialize.
+
+We may as well proceed to the description of the noinit constructor for a
+\chpl{DefaultRectangularArr}, and then consider how this design might be back-patched into
+the default initializer to defer allocation and initialization of the contained elements.
+
+\subsubsection{Array Noinit Construction}
+
+To implement noinit initialization for the default rectangular array, all we need to do is 
+\begin{chapel}
+  ntor DefaultRectangularArr(type eltType, param rank:int,
+                             type idxType, stridable:bool,
+                             dom, initVal)
+  with (eltType=eltType, rank=rank, idxType=idxType,
+        stridable=stridable, dom=dom, initVal=initVal)
+  {}
+\end{chapel}
+\noindent
+This is identical with the constructor except that the call to initialize() has been
+omitted.  The interesting part is how an element of the array is initialized later in the
+code.  From the view of the user, the array has been initialized, but a read access of any
+element in the array yields its default value.  
+
+Array value accesses are implemented through the \chpl{this} routine in ChapelArray.chpl,
+which returns a reference to the indexed element.  To perform the magic of faking in the
+default value on a read before the corresponding element has been initialized, we need to
+be able to distinguish a read from a write.  We add a param bool \chpl{setter} to the
+signature of \chpl{this()}, and assume that the compiler sets this appropriately,
+depending on whether the array access is evaluated as an lvalue or rvalue.
+
+At the array level, \chpl{this()} is modified to pass its value on to \chpl{dsiAccess()}.
+We could also consider splitting \chpl{dsiAccess} into \chpl{dsiGet()} and \chpl{dsiSet()}.
+\begin{chapel}
+    inline proc this(i: rank*_value.dom.idxType) ref {
+      // Simplified.
+      return _value.dsiAccess(setter, i);
+    }
+\end{chapel}
+\noindent
+In the array implementation, we can check this flag to do something different for reads
+vs. writes.  In the case of a read, the behavior shown below is that the initialization
+value stored in the array implementation is returned for an access made before the
+contents of the array are initialized.
+
+When an attempt is made to write into the array, the entire array is allocated an
+initialized in bulk using the supplied initialization value.
+\begin{chapel}
+    inline proc dsiAccess(param setter: bool, ind : rank*idxType) 
+    where setter == false
+    {
+      // If the data array is uninitialized, just return the default value.
+      if data == nil then
+        return initVal;
+      else {
+        var dataInd = getDataIndex(ind);
+        return data(dataInd);
+      }
+    }
+
+    inline proc dsiAccess(param setter: bool, ind : rank*idxType) ref
+    where setter == true
+    {
+      // Allocate and initialize the array the first time an attempt is made to write into it.
+      if data == nil then
+        initialize();
+      var dataInd = getDataIndex(ind);
+      return data(dataInd);
+    }
+\end{chapel}
+
+This design still suffers from the disadvantage that the entire array is allocated and
+every element initialized in bulk.  Supposing that we are expecting to overwrite the array
+after it is initialized, we can have a different form of \chpl{initialize()} that only
+allocates and does not initialize.  We can factor the element initialization out of
+\chpl{_ddata_allocate()}:
+\begin{chapel}
+  inline proc _ddata_allocate(type eltType, size: integral) {
+    var ret:_ddata(eltType);
+    __primitive("array_alloc", ret, eltType, size);
+    return ret;
+  }
+\end{chapel}
+Then, \chpl{initialize()} can be modified to leave out initializing the array elements.
+\begin{chapel}
+    proc initialize(param initialize_elts = true) {
+      for param dim in 1..rank {
+        off(dim) = dom.dsiDim(dim).alignedLow;
+        str(dim) = dom.dsiDim(dim).stride;
+      }
+      blk(rank) = 1:idxType;
+      for param dim in 1..(rank-1) by -1 do
+        blk(dim) = blk(dim+1) * dom.dsiDim(dim+1).length;
+      computeFactoredOffs();
+      var size = blk(1) * dom.dsiDim(1).length;
+      data = _ddata_allocate(eltType, size, initVal);
+      if (initialize_elts) then
+        init_elts(data, size, eltType, initVal);
+    }
+\end{chapel}
+Then our setter version of this above can be modified to call \chpl{initialize(false)}.
+This will allocate the array and fill it with potentially garbage values.  That is
+probably not what the user desires, but this is proof that we can do it.
+
+Going back to the original idea of noinit, where delayed initialization is to be applied
+to the elements rather than to the array as a whole, we can perform the just the
+allocation part by calling \chpl{initialize(false)} in the body of the \chpl{ntor} and
+calling \chpl{initialize(true)} in the body of the ctor.
+
+\subsubsection{Parallel Initialization}
+
+
+\subsubsection{Class Elements}
+

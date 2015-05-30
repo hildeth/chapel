@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -17,7 +17,6 @@
  * limitations under the License.
  */
 
-pragma "no use ChapelStandard"
 module ChapelIteratorSupport {
   //
   // module support for iterators
@@ -135,6 +134,22 @@ module ChapelIteratorSupport {
   inline proc _toLeaderZip(x: _tuple)
     return _toLeader(x(1));
 
+  pragma "no implicit copy"
+  inline proc _toStandalone(iterator: _iteratorClass)
+    return chpl__autoCopy(__primitive("to standalone", iterator));
+
+  inline proc _toStandalone(ir: _iteratorRecord) {
+    pragma "no copy" var ic = _getIterator(ir);
+    pragma "no copy" var standalone = _toStandalone(ic);
+    _freeIterator(ic);
+    return standalone;
+  }
+
+  inline proc _toStandalone(x) {
+    return _toStandalone(x.these());
+  }
+
+
   //
   // additional _toLeader/_toLeaderZip for forall intents
   //
@@ -166,6 +181,19 @@ module ChapelIteratorSupport {
   pragma "expand tuples with values"
   inline proc _toLeaderZip(x: _tuple, args...)
     return _toLeader(x(1), (...args));
+
+  pragma "no implicit copy"
+  pragma "expand tuples with values"
+  inline proc _toStandalone(iterator: _iteratorClass, args...)
+    return chpl__autoCopy(__primitive("to standalone", iterator, (...args)));
+
+  pragma "expand tuples with values"
+  inline proc _toStandalone(ir: _iteratorRecord, args...) {
+    pragma "no copy" var ic = _getIterator(ir);
+    pragma "no copy" var standalone = _toStandalone(ic, (...args));
+    _freeIterator(ic);
+    return standalone;
+  }
 
   //
   // return true if any iterator supports fast followers

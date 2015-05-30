@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -27,6 +27,7 @@
 #include "resolution.h"
 
 #include "astutil.h"
+#include "stlUtil.h"
 #include "build.h"
 #include "caches.h"
 #include "callInfo.h"
@@ -34,7 +35,9 @@
 #include "expr.h"
 #include "ForLoop.h"
 #include "iterator.h"
+#include "ParamForLoop.h"
 #include "passes.h"
+#include "resolveIntents.h"
 #include "scopeResolve.h"
 #include "stmt.h"
 #include "stringutil.h"
@@ -317,8 +320,7 @@ static void resolveNew(CallExpr* call);
 static bool formalRequiresTemp(ArgSymbol* formal);
 static void insertFormalTemps(FnSymbol* fn);
 static void addLocalCopiesAndWritebacks(FnSymbol* fn, SymbolMap& formals2vars);
-static Type* param_for_index_type(CallExpr* loop);
-static void fold_param_for(CallExpr* loop);
+
 static Expr* dropUnnecessaryCast(CallExpr* call);
 static AggregateType* createAndInsertFunParentClass(CallExpr *call, const char *name);
 static FnSymbol* createAndInsertFunParentMethod(CallExpr *call, AggregateType *parent, AList &arg_list, bool isFormal, Type *retType);
@@ -374,6 +376,7 @@ static void insertReturnTemps();
 static void initializeClass(Expr* stmt, Symbol* sym);
 static void handleRuntimeTypes();
 static void pruneResolvedTree();
+static void removeCompilerWarnings();
 static void removeUnusedFunctions();
 static void removeUnusedTypes();
 static void buildRuntimeTypeInitFns();
@@ -619,7 +622,7 @@ const char* toString(FnSymbol* fn) {
   } else if (fn->hasFlag(FLAG_CONSTRUCTOR)) {
     INT_ASSERT(!strncmp("_construct_", fn->name, 11));
     str = astr(fn->name+11);
-  } else if (fn->hasFlag(FLAG_METHOD)) {
+  } else if (fn->isPrimaryMethod()) {
     if (!strcmp(fn->name, "this")) {
       INT_ASSERT(fn->hasFlag(FLAG_FIRST_CLASS_FUNCTION_INVOCATION));
       str = astr(toString(fn->getFormal(2)->type));
@@ -688,12 +691,17 @@ protoIteratorMethod(IteratorInfo* ii, const char* name, Type* retType) {
   if (strcmp(name, "advance"))
     fn->addFlag(FLAG_INLINE);
   fn->insertFormalAtTail(new ArgSymbol(INTENT_BLANK, "_mt", dtMethodToken));
+  fn->addFlag(FLAG_METHOD);
   fn->_this = new ArgSymbol(INTENT_BLANK, "this", ii->iclass);
   fn->_this->addFlag(FLAG_ARG_THIS);
   fn->retType = retType;
   fn->insertFormalAtTail(fn->_this);
   ii->iterator->defPoint->insertBefore(new DefExpr(fn));
   normalize(fn);
+
+  // Pretend that this function is already resolved.
+  // Its body will be filled in during the lowerIterators pass.
+  fn->addFlag(FLAG_RESOLVED);
   return fn;
 }
 
@@ -736,22 +744,16 @@ protoIteratorClass(FnSymbol* fn) {
   ii->init = protoIteratorMethod(ii, "init", dtVoid);
   ii->incr = protoIteratorMethod(ii, "incr", dtVoid);
 
+  // The original iterator function is stashed in the defaultInitializer field
+  // of the iterator record type.  Since we are only creating shell functions
+  // here, we still need a way to obtain the original iterator function, so we
+  // can fill in the bodies of the above 9 methods in the lowerIterators pass.
   ii->irecord->defaultInitializer = fn;
   ii->irecord->scalarPromotionType = fn->retType;
   fn->retType = ii->irecord;
   fn->retTag = RET_VALUE;
 
   makeRefType(fn->retType);
-
-  fn->iteratorInfo->zip1->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->zip2->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->zip3->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->zip4->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->advance->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->hasMore->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->getValue->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->init->addFlag(FLAG_RESOLVED);
-  fn->iteratorInfo->incr->addFlag(FLAG_RESOLVED);
 
   ii->getIterator = new FnSymbol("_getIterator");
   ii->getIterator->addFlag(FLAG_AUTO_II);
@@ -765,6 +767,10 @@ protoIteratorClass(FnSymbol* fn) {
   ii->getIterator->insertAtTail(new CallExpr(PRIM_SETCID, ret));
   ii->getIterator->insertAtTail(new CallExpr(PRIM_RETURN, ret));
   fn->defPoint->insertBefore(new DefExpr(ii->getIterator));
+  // The _getIterator function is stashed in the defaultInitializer field of
+  // the iterator class type.  This makes it easy to obtain the iterator given
+  // just a symbol of the iterator class type.  This may include _getIterator
+  // and _getIteratorZip functions in the module code.
   ii->iclass->defaultInitializer = ii->getIterator;
   normalize(ii->getIterator);
   resolveFns(ii->getIterator);  // No shortcuts.
@@ -851,7 +857,7 @@ okToConvertFormalToRefType(Type* type) {
 
 static void
 resolveSpecifiedReturnType(FnSymbol* fn) {
-  resolveBlock(fn->retExprType);
+  resolveBlockStmt(fn->retExprType);
   fn->retType = fn->retExprType->body.tail->typeInfo();
   if (fn->retType != dtUnknown) {
     if (fn->retTag == RET_REF) {
@@ -859,7 +865,7 @@ resolveSpecifiedReturnType(FnSymbol* fn) {
       fn->retType = fn->retType->refType;
     }
     fn->retExprType->remove();
-    if (fn->hasFlag(FLAG_ITERATOR_FN) && !fn->iteratorInfo) {
+    if (fn->isIterator() && !fn->iteratorInfo) {
       protoIteratorClass(fn);
     }
   }
@@ -919,7 +925,7 @@ resolveFormals(FnSymbol* fn) {
         if (!formal->typeExpr) {
           formal->type = dtObject;
         } else {
-          resolveBlock(formal->typeExpr);
+          resolveBlockStmt(formal->typeExpr);
           formal->type = formal->typeExpr->body.tail->getValType();
         }
       }
@@ -1072,7 +1078,10 @@ isLegalLvalueActualArg(ArgSymbol* formal, Expr* actual) {
         se->var->isParameter())
       if (okToConvertFormalToRefType(formal->type) ||
           // If the user says 'const', it means 'const'.
-          (se->var->hasFlag(FLAG_CONST) && !se->var->hasFlag(FLAG_TEMP)))
+          // Honor FLAG_CONST if it is a coerce temp, too.
+          (se->var->hasFlag(FLAG_CONST) &&
+           (!se->var->hasFlag(FLAG_TEMP) || se->var->hasFlag(FLAG_COERCE_TEMP))
+         ))
         return false;
   // Perhaps more checks are needed.
   return true;
@@ -1226,7 +1235,7 @@ canCoerce(Type* actualType, Symbol* actualSym, Type* formalType, FnSymbol* fn, b
   }
   if (actualType->symbol->hasFlag(FLAG_REF))
     return canDispatch(actualType->getValType(), NULL, formalType, fn, promotes);
-  if (//(toVarSymbol(actualSym) || toArgSymbol(actualSym)) && // What does this exclude?
+  if (// isLcnSymbol(actualSym) && // What does this exclude?
       actualType == dtStringC && formalType == dtString)
     return true;
   if (formalType == dtStringC && actualType == dtStringCopy)
@@ -1409,7 +1418,7 @@ computeGenericSubs(SymbolMap &subs,
         if (subs.n)
           break;
 
-        resolveBlock(formal->defaultExpr);
+        resolveBlockStmt(formal->defaultExpr);
         SymExpr* se = toSymExpr(formal->defaultExpr->body.tail);
         if (se && se->var->isParameter() &&
             (!formal->type->symbol->hasFlag(FLAG_GENERIC) || canInstantiate(se->var->type, formal->type)))
@@ -1452,7 +1461,7 @@ computeGenericSubs(SymbolMap &subs,
         if (subs.n)
           break;
 
-        resolveBlock(formal->defaultExpr);
+        resolveBlockStmt(formal->defaultExpr);
         Type* defaultType = formal->defaultExpr->body.tail->typeInfo();
         if (defaultType == dtTypeDefaultToken)
           subs.put(formal, dtTypeDefaultToken->symbol);
@@ -1573,7 +1582,7 @@ expandVarArgs(FnSymbol* origFn, int numActuals) {
     }
 
     if (!genericArgSeen && formal->variableExpr && !isDefExpr(formal->variableExpr->body.tail)) {
-      resolveBlock(formal->variableExpr);
+      resolveBlockStmt(formal->variableExpr);
     }
 
     /*
@@ -2592,6 +2601,18 @@ static Map<BlockStmt*,BlockStmt*> visibilityBlockCache;
 static Vec<BlockStmt*> standardModuleSet;
 
 //
+// return true if expr is a CondStmt with chpl__tryToken as its condition 
+//
+static bool isTryTokenCond(Expr* expr) {
+  CondStmt* cond = toCondStmt(expr);
+  if (!cond) return false;
+  SymExpr* sym = toSymExpr(cond->condExpr);
+  if (!sym) return false;
+  return sym->var == gTryToken;
+}
+
+
+//
 // return the innermost block for searching for visible functions
 //
 BlockStmt*
@@ -2599,7 +2620,17 @@ getVisibilityBlock(Expr* expr) {
   if (BlockStmt* block = toBlockStmt(expr->parentExpr)) {
     if (block->blockTag == BLOCK_SCOPELESS)
       return getVisibilityBlock(block);
-    else
+    else if (block->parentExpr && isTryTokenCond(block->parentExpr)) {
+      // Make the visibility block of the then and else blocks of a
+      // conditional using chpl__tryToken be the block containing the
+      // conditional statement.  Without this, there were some cases where
+      // a function gets instantiated into one side of the conditional but
+      // used in both sides, then the side with the instantiation gets
+      // folded out leaving expressions with no visibility block.
+      // test/functions/iterators/angeles/dynamic.chpl is an example that
+      // currently fails without this.
+      return getVisibilityBlock(block->parentExpr);
+    } else
       return block;
   } else if (expr->parentExpr) {
     return getVisibilityBlock(expr->parentExpr);
@@ -2707,21 +2738,6 @@ getVisibleFunctions(BlockStmt* block,
   return NULL;
 }
 
-static void replaceActualWithDeref(CallExpr* call, Type* derefType,
-                                   SymExpr* actualExpr, Symbol* actualSym,
-                                   CallInfo* info, int argNum)
-{
-  SET_LINENO(call);
-  Expr* stmt = call->getStmtExpr();
-  VarSymbol* derefTmp = newTemp("derefTmp", derefType);
-  stmt->insertBefore(new DefExpr(derefTmp));
-  stmt->insertBefore(new_Expr("'move'(%S, 'deref'(%S))", derefTmp, actualSym));
-  actualExpr->var = derefTmp;
-  INT_ASSERT(info->actuals.v[argNum] == actualSym);
-  info->actuals.v[argNum] = derefTmp;
-}
-
-
 static void handleCaptureArgs(CallExpr* call, FnSymbol* taskFn, CallInfo* info) {
   INT_ASSERT(taskFn);
   if (!needsCapture(taskFn)) {
@@ -2760,10 +2776,11 @@ static void handleCaptureArgs(CallExpr* call, FnSymbol* taskFn, CallInfo* info) 
       Type* deref = varActual->type->getValType();
       if (needsCapture(deref)) {
         formal->type = deref;
-        replaceActualWithDeref(call, deref, symexpActual, varActual,
-                               info, argNum);
-      } else {
-        // Probably OK to leave as-is.
+        // If the formal has a ref intent, DO need a ref type => restore it.
+        resolveArgIntent(formal);
+        if (formal->intent & INTENT_FLAG_REF) {
+          formal->type = varActual->type;
+        }
       }
     }
 
@@ -2815,21 +2832,76 @@ makeNoop(CallExpr* call) {
   call->primitive = primitives[PRIM_NOOP];
 }
 
-static bool isInConstructorLikeFunction(CallExpr* call) {
-  return call->parentSymbol->hasFlag(FLAG_CONSTRUCTOR) ||
-         !strcmp(call->parentSymbol->name, "initialize");
+
+//
+// The following several functions support const-ness checking.
+// Which is tailored to how our existing Chapel code is written
+// and to the current constructor story. In particular:
+//
+// * Const-ness of fields is not honored within constructors
+// and initialize() functions
+//
+// * A function invoked directly from a constructor or initialize()
+// are treated as if were a constructor.
+//
+// The implementation also tends to the case where such an invocation
+// occurs inside a task function within the constructor or initialize().
+//
+// THESE RULES ARE INTERIM.
+// They will change - and the Chapel code will need to be updated -
+// for the upcoming new constructor story.
+//
+// Implementation note: we need to propagate the constness property
+// through temp assignments, dereferences, and calls to methods with
+// FLAG_REF_TO_CONST_WHEN_CONST_THIS.
+//
+
+static void findNonTaskFnParent(CallExpr* call,
+                                FnSymbol*& parent, int& stackIdx) {
+  // We assume that 'call' is at the top of the call stack.
+  INT_ASSERT(callStack.n >= 1);
+  INT_ASSERT(callStack.v[callStack.n-1] == call ||
+             callStack.v[callStack.n-1] == call->parentExpr);
+
+  int ix;
+  for (ix = callStack.n-1; ix >= 0; ix--) {
+    CallExpr* curr = callStack.v[ix];
+    Symbol* parentSym = curr->parentSymbol;
+    FnSymbol* parentFn = toFnSymbol(parentSym);
+    if (!parentFn)
+      break;
+    if (!isTaskFun(parentFn)) {
+      stackIdx = ix;
+      parent = parentFn;
+      return;
+    }
+  }
+  // backup plan
+  parent = toFnSymbol(call->parentSymbol);
+  stackIdx = -1;
 }
 
-// The function call->parentSymbol is invoked from a constructor
+static bool isConstructorLikeFunction(FnSymbol* fn) {
+  return fn->hasFlag(FLAG_CONSTRUCTOR) || !strcmp(fn->name, "initialize");
+}
+
+// Is 'call' in a constructor or in initialize()?
+// This includes being in a task function invoked from the above.
+static bool isInConstructorLikeFunction(CallExpr* call) {
+  FnSymbol* parent;
+  int stackIdx;
+  findNonTaskFnParent(call, parent, stackIdx); // sets the args
+  return parent && isConstructorLikeFunction(parent);
+}
+
+// Is the function of interest invoked from a constructor
 // or initialize(), with the constructor's or intialize's 'this'
 // as the receiver actual.
-static bool isInvokedFromConstructorLikeFunction(CallExpr* call1) {
-  // We assume that 'call' is at the top of the call stack.
-  INT_ASSERT(callStack.n >= 1 && call1 == callStack.v[callStack.n-1]);
-  if (callStack.n >= 2) {
-    CallExpr* call2 = callStack.v[callStack.n-2];
-    INT_ASSERT(call2->isResolved() == call1->parentSymbol); // sanity
-    if (isInConstructorLikeFunction(call2))
+static bool isInvokedFromConstructorLikeFunction(int stackIdx) {
+  if (stackIdx > 0) {
+    CallExpr* call2 = callStack.v[stackIdx - 1];
+    if (FnSymbol* parent2 = toFnSymbol(call2->parentSymbol))
+     if (isConstructorLikeFunction(parent2))
       if (call2->numActuals() >= 2)
         if (SymExpr* thisArg2 = toSymExpr(call2->get(2)))
           if (thisArg2->var->hasFlag(FLAG_ARG_THIS))
@@ -2842,99 +2914,104 @@ static bool isInvokedFromConstructorLikeFunction(CallExpr* call1) {
 // and the call is in a function invoked directly from this's constructor.
 // In such case, fields of 'this' are not considered 'const',
 // so we remove the const-ness flag.
-static bool checkAndUpdateIfLegalFieldOfThis(CallExpr* call, Expr* actual) {
+static bool checkAndUpdateIfLegalFieldOfThis(CallExpr* call, Expr* actual,
+                                             FnSymbol*& nonTaskFnParent) {
+  int stackIdx;
+  findNonTaskFnParent(call, nonTaskFnParent, stackIdx); // sets the args
+
   if (SymExpr* se = toSymExpr(actual))
     if (se->var->hasFlag(FLAG_REF_FOR_CONST_FIELD_OF_THIS))
-      if (isInvokedFromConstructorLikeFunction(call)) {
+      if (isInvokedFromConstructorLikeFunction(stackIdx)) {
           // Yes, this is the case we are looking for.
           se->var->removeFlag(FLAG_REF_TO_CONST);
           return true;
       }
+
   return false;
 }
+
+
+// little helper
+static Symbol* getBaseSymForConstCheck(CallExpr* call) {
+  // ensure this is a method call
+  INT_ASSERT(call->get(1)->typeInfo() == dtMethodToken);
+  SymExpr* baseExpr = toSymExpr(call->get(2));
+  INT_ASSERT(baseExpr); // otherwise, cannot do the checking
+  return baseExpr->var;
+}
+ 
 
 // If 'call' is an access to a const thing, for example a const field
 // or a field of a const record, set const flag(s) on the symbol
 // that stores the result of 'call'.
-static void setFlagsForConstAccess(CallExpr* call, FnSymbol* resolvedFn)
+static void setFlagsAndCheckForConstAccess(Symbol* dest,
+                                         CallExpr* call, FnSymbol* resolvedFn)
 {
   // Is the outcome of 'call' a reference to a const?
   bool refConst = resolvedFn->hasFlag(FLAG_REF_TO_CONST);
-
-  // ... except do a couple of adjustments for field accesses.
-  // Do we really need FLAG_FIELD_ACCESSOR here? Perhaps we do,
-  // in order to treat field accesses to const records specially.
+  // Another flag that's relevant.
+  const bool constWCT = resolvedFn->hasFlag(FLAG_REF_TO_CONST_WHEN_CONST_THIS);
+  // The second flag does not make sense when the first flag is set.
+  INT_ASSERT(!(refConst && constWCT));
 
   // The symbol whose field is accessed, if applicable:
   Symbol* baseSym = NULL;
 
-  if (resolvedFn->hasFlag(FLAG_FIELD_ACCESSOR) &&
-      // promotion wrappers are not handled currently
-      !resolvedFn->hasFlag(FLAG_PROMOTION_WRAPPER))
-  {
-    SymExpr* baseExpr = toSymExpr(call->get(2));
-    INT_ASSERT(baseExpr); // otherwise, cannot do the checking
-    // the symbol whose field is accessed
-    baseSym = baseExpr->var;
+  if (refConst) {
+    if (resolvedFn->hasFlag(FLAG_FIELD_ACCESSOR) &&
+        // promotion wrappers are not handled currently
+        !resolvedFn->hasFlag(FLAG_PROMOTION_WRAPPER)
+        )
+      baseSym = getBaseSymForConstCheck(call);
 
-    if (refConst) {
-      // Do not consider it const if it is an access to 'this'
-      // in a constructor. Todo: will need to reconcile with UMM.
-      if (baseSym->hasFlag(FLAG_ARG_THIS) &&
-          isInConstructorLikeFunction(call))
-        refConst = false;
-    } else {
-      // See if the variable being accessed is const.
-      if (baseSym->isConstant() ||
-          baseSym->hasFlag(FLAG_REF_TO_CONST)
-      ) {
-        // Todo: fine-tuning may be desired, e.g.
-        // if FLAG_CONST then baseType = baseSym->type.
-        Type* baseType = baseSym->type->getValType();
-        // Exclude classes: even if a class variable is const,
-        // its non-const fields are OK to modify.
-        if (isRecord(baseType) || isUnion(baseType))
-          refConst = true;
-        else
-          INT_ASSERT(isClass(baseType));
-      }
-    }
+  } else if (constWCT) {
+    baseSym = getBaseSymForConstCheck(call);
+    if (baseSym->isConstant()               ||
+        baseSym->hasFlag(FLAG_REF_TO_CONST) ||
+        baseSym->hasFlag(FLAG_CONST)
+       )
+      refConst = true;
+    else
+      // The result is not constant.
+      baseSym = NULL;
 
-  } else if (!refConst &&
-             resolvedFn->hasFlag(FLAG_REF_TO_CONST_WHEN_CONST_THIS))
+  } else if (dest->hasFlag(FLAG_ARRAY_ALIAS)        &&
+             resolvedFn->hasFlag(FLAG_AUTO_COPY_FN) &&
+             !dest->hasFlag(FLAG_CONST))
   {
-    // todo - avoid code duplication w.r.t. the above
-    // 'resolvedFn' is either a 'var' function or returns an array or such
-    SymExpr* baseExpr = toSymExpr(call->get(2));
-    INT_ASSERT(baseExpr); // otherwise, cannot do the checking
-    // the symbol for 'this'
-    baseSym = baseExpr->var;
-    // See if the variable being accessed is const.
-    if (baseSym->isConstant() ||
-        // somehow above the check is: baseSym->hasFlag(FLAG_REF_TO_CONST)
-        baseSym->hasFlag(FLAG_CONST))
-    {
-      // Do not consider it const if it is an access to 'this'
-      // in a constructor. Todo: will need to reconcile with UMM.
-      if (baseSym->hasFlag(FLAG_ARG_THIS) &&
-          isInConstructorLikeFunction(call))
-        ; // nothing
-      else
-        refConst = true;
-    }
+    // We are creating a var alias - ensure aliasee is not const either.
+    SymExpr* aliaseeSE = toSymExpr(call->get(1));
+    INT_ASSERT(aliaseeSE);
+    if (aliaseeSE->var->isConstant() ||
+        aliaseeSE->var->hasFlag(FLAG_CONST))
+      USR_FATAL_CONT(call, "creating a non-const alias '%s' of a const array or domain", dest->name);
+  }
+
+  // Do not consider it const if it is an access to 'this'
+  // in a constructor. Todo: will need to reconcile with UMM.
+  // btw (baseSym != NULL) ==> (refConst == true).
+  if (baseSym) {
+    // Aside: at this point 'baseSym' can have reference or value type,
+    // seemingly without a particular rule.
+    if (baseSym->hasFlag(FLAG_ARG_THIS)   &&
+        isInConstructorLikeFunction(call)
+        )
+      refConst = false;
   }
 
   if (refConst) {
-    if (CallExpr* parent = toCallExpr(call->parentExpr)) {
-      if (parent->isPrimitive(PRIM_MOVE)) {
-        SymExpr* dest = toSymExpr(parent->get(1));
-        INT_ASSERT(dest); // what else can it be?
-        dest->var->addFlag(FLAG_REF_TO_CONST);
-        if (baseSym && baseSym->hasFlag(FLAG_ARG_THIS))
-          // 'call' can be a field accessor or an array element accessor or ?
-          dest->var->addFlag(FLAG_REF_FOR_CONST_FIELD_OF_THIS);
-      }
-    }
+    if (isReferenceType(dest->type))
+      dest->addFlag(FLAG_REF_TO_CONST);
+    else
+      dest->addFlag(FLAG_CONST);
+
+    if (baseSym && baseSym->hasFlag(FLAG_ARG_THIS))
+      // 'call' can be a field accessor or an array element accessor or ?
+      dest->addFlag(FLAG_REF_FOR_CONST_FIELD_OF_THIS);
+
+    // Propagate this flag.  btw (recConst && constWCT) ==> (baseSym != NULL)
+    if (constWCT && baseSym->hasFlag(FLAG_REF_FOR_CONST_FIELD_OF_THIS))
+      dest->addFlag(FLAG_REF_FOR_CONST_FIELD_OF_THIS);
   }
 }
 
@@ -3233,15 +3310,15 @@ void resolveNormalCall(CallExpr* call) {
     call->baseExpr->replace(new SymExpr(resolvedFn));
   }
 
-  setFlagsForConstAccess(call, resolvedFn);
-  checkForStoringIntoTuple(call, resolvedFn);
-
   if (resolvedFn->hasFlag(FLAG_MODIFIES_CONST_FIELDS))
     // Not allowed if it is not called directly from a constructor.
-    if (!isInConstructorLikeFunction(call))
-      USR_FATAL_CONT(call, "illegal call to %s() - it modifies 'const' fields of 'this', therefore it can be invoked only directly from a constructor", resolvedFn->name);
+    if (!isInConstructorLikeFunction(call) ||
+        !getBaseSymForConstCheck(call)->hasFlag(FLAG_ARG_THIS)
+        )
+      USR_FATAL_CONT(call, "illegal call to %s() - it modifies 'const' fields of 'this', therefore it can be invoked only directly from a constructor on the object being constructed", resolvedFn->name);
 
   lvalueCheck(call);
+  checkForStoringIntoTuple(call, resolvedFn);
 
   if (const char* str = innerCompilerWarningMap.get(resolvedFn)) {
     reissueCompilerWarning(str, 2);
@@ -3288,12 +3365,16 @@ static void lvalueCheck(CallExpr* call)
       INT_ASSERT(false);
       break;
     }
-    if (errorMsg && checkAndUpdateIfLegalFieldOfThis(call, actual)) {
+    FnSymbol* nonTaskFnParent = NULL;
+    if (errorMsg &&
+        // sets nonTaskFnParent
+        checkAndUpdateIfLegalFieldOfThis(call, actual, nonTaskFnParent)
+    ) {
       errorMsg = false;
-      call->parentSymbol->addFlag(FLAG_MODIFIES_CONST_FIELDS);
+      nonTaskFnParent->addFlag(FLAG_MODIFIES_CONST_FIELDS);
     }
     if (errorMsg) {
-      if (call->parentSymbol->hasFlag(FLAG_SUPPRESS_LVALUE_ERRORS))
+      if (nonTaskFnParent->hasFlag(FLAG_SUPPRESS_LVALUE_ERRORS))
         // we are asked to ignore errors here
         return;
       FnSymbol* calleeFn = call->isResolved();
@@ -3318,7 +3399,7 @@ static void lvalueCheck(CallExpr* call)
         char cn1 = calleeFn->name[0];
         const char* calleeParens = (isalpha(cn1) || cn1 == '_') ? "()" : "";
         // Should this be the same condition as in insertLineNumber() ?
-        if (developer || mod->modTag == MOD_USER || mod->modTag == MOD_MAIN) {
+        if (developer || mod->modTag == MOD_USER) {
           USR_FATAL_CONT(actual, "non-lvalue actual is passed to %s formal '%s'"
                          " of %s%s", formal->intentDescrString(), formal->name,
                          calleeFn->name, calleeParens);
@@ -3328,6 +3409,40 @@ static void lvalueCheck(CallExpr* call)
                          calleeFn->name, calleeParens);
         }
       }
+    }
+  }
+}
+
+
+// We do some const-related work upon PRIM_MOVE
+static void setConstFlagsAndCheckUponMove(Symbol* lhs, Expr* rhs) {
+  // If this assigns into a loop index variable from a non-var iterator,
+  // mark the variable constant.
+  if (SymExpr* rhsSE = toSymExpr(rhs)) {
+    // If RHS is this special variable...
+    if (rhsSE->var->hasFlag(FLAG_INDEX_OF_INTEREST)) {
+      INT_ASSERT(lhs->hasFlag(FLAG_INDEX_VAR));
+      // ... and not of a reference type
+      // todo: differentiate based on ref-ness, not _ref type
+      // todo: not all const if it is zippered and one of iterators is var
+      if (!isReferenceType(rhsSE->var->type))
+       // ... and not an array (arrays are always yielded by reference)
+       if (!rhsSE->var->type->symbol->hasFlag(FLAG_ARRAY))
+        // ... then mark LHS constant.
+        lhs->addFlag(FLAG_CONST);
+    }
+  } else if (CallExpr* rhsCall = toCallExpr(rhs)) {
+    if (rhsCall->isPrimitive(PRIM_GET_MEMBER)) {
+      if (SymExpr* rhsBase = toSymExpr(rhsCall->get(1))) {
+        if (rhsBase->var->hasFlag(FLAG_CONST) ||
+            rhsBase->var->hasFlag(FLAG_REF_TO_CONST)
+            )
+          lhs->addFlag(FLAG_REF_TO_CONST);
+      } else {
+        INT_ASSERT(false); // PRIM_GET_MEMBER of a non-SymExpr??
+      }
+    } else if (FnSymbol* resolvedFn = rhsCall->isResolved()) {
+        setFlagsAndCheckForConstAccess(lhs, rhsCall, resolvedFn);
     }
   }
 }
@@ -3542,27 +3657,12 @@ static void resolveMove(CallExpr* call) {
     }
   }
 
-  // If this assigns into a loop index variable from a non-var iterator,
-  // mark the variable constant.
-  if (SymExpr* rhsSE = toSymExpr(rhs)) {
-    // If RHS is this special variable...
-    if (rhsSE->var->hasFlag(FLAG_INDEX_OF_INTEREST)) {
-      INT_ASSERT(lhs->hasFlag(FLAG_INDEX_VAR));
-      // ... and not of a reference type
-      // todo: differentiate based on ref-ness, not _ref type
-      // todo: not all const if it is zippered and one of iterators is var
-      if (!isReferenceType(rhsSE->var->type))
-       // ... and not an array (arrays are always yielded by reference)
-       if (!rhsSE->var->type->symbol->hasFlag(FLAG_ARRAY))
-        // ... then mark LHS constant.
-        lhs->addFlag(FLAG_CONST);
-    }
-  }
-
   if (lhs->type == dtUnknown || lhs->type == dtNil)
     lhs->type = rhsType;
 
   Type* lhsType = lhs->type;
+
+  setConstFlagsAndCheckUponMove(lhs, rhs);
 
   if (CallExpr* call = toCallExpr(rhs)) {
     if (FnSymbol* fn = call->isResolved()) {
@@ -3891,104 +3991,9 @@ static void addLocalCopiesAndWritebacks(FnSymbol* fn, SymbolMap& formals2vars)
   }
 }
 
-
 //
-// Calculate the index type for a param for loop by checking the type of
-// the range that would be built using the same low and high values.
 //
-static Type* param_for_index_type(CallExpr* loop) {
-  BlockStmt* block = toBlockStmt(loop->parentExpr);
-  SymExpr* lse = toSymExpr(loop->get(2));
-  SymExpr* hse = toSymExpr(loop->get(3));
-  CallExpr* range = new CallExpr("_build_range", lse->copy(), hse->copy());
-  block->insertBefore(range);
-  resolveCall(range);
-  if (!range->isResolved()) {
-    INT_FATAL("unresolved range");
-  }
-  resolveFormals(range->isResolved());
-  DefExpr* formal = toDefExpr(range->isResolved()->formals.get(1));
-  Type* formalType;
-  if (toArgSymbol(formal->sym)->typeExpr) {
-    // range->isResolved() is the coercion wrapper for _build_range
-    formalType = toArgSymbol(formal->sym)->typeExpr->body.tail->typeInfo();
-  } else {
-    formalType = formal->sym->type;
-  }
-  range->remove();
-  return formalType;
-}
-
-
-static void fold_param_for(CallExpr* loop) {
-  BlockStmt* block = toBlockStmt(loop->parentExpr);
-  SymExpr* lse = toSymExpr(loop->get(2));
-  SymExpr* hse = toSymExpr(loop->get(3));
-  SymExpr* sse = toSymExpr(loop->get(4));
-  if (!block || !lse || !hse || !sse)
-    USR_FATAL(loop, "param for loop must be defined over a param range");
-  VarSymbol* lvar = toVarSymbol(lse->var);
-  VarSymbol* hvar = toVarSymbol(hse->var);
-  VarSymbol* svar = toVarSymbol(sse->var);
-  if (!lvar || !hvar || !svar)
-    USR_FATAL(loop, "param for loop must be defined over a param range");
-  if (!lvar->immediate || !hvar->immediate || !svar->immediate)
-    USR_FATAL(loop, "param for loop must be defined over a param range");
-  Expr* index_expr = loop->get(1);
-  Type* formalType = param_for_index_type(loop);
-  IF1_int_type idx_size;
-  if (get_width(formalType) == 32) {
-    idx_size = INT_SIZE_32;
-  } else {
-    idx_size = INT_SIZE_64;
-  }
-  if (block->blockTag != BLOCK_NORMAL)
-    INT_FATAL("ha");
-  loop->remove();
-  CallExpr* noop = new CallExpr(PRIM_NOOP);
-  block->insertAfter(noop);
-  Symbol* index = toSymExpr(index_expr)->var;
-
-  if (is_int_type(formalType)) {
-    int64_t low = lvar->immediate->int_value();
-    int64_t high = hvar->immediate->int_value();
-    int64_t stride = svar->immediate->int_value();
-    if (stride <= 0) {
-      for (int64_t i = high; i >= low; i += stride) {
-        SymbolMap map;
-        map.put(index, new_IntSymbol(i, idx_size));
-        noop->insertBefore(block->copy(&map));
-      }
-    } else {
-      for (int64_t i = low; i <= high; i += stride) {
-        SymbolMap map;
-        map.put(index, new_IntSymbol(i, idx_size));
-        noop->insertBefore(block->copy(&map));
-      }
-    }
-  } else {
-    INT_ASSERT(is_uint_type(formalType) || is_bool_type(formalType));
-    uint64_t low = lvar->immediate->uint_value();
-    uint64_t high = hvar->immediate->uint_value();
-    int64_t stride = svar->immediate->int_value();
-    if (stride <= 0) {
-      for (uint64_t i = high; i >= low; i += stride) {
-        SymbolMap map;
-        map.put(index, new_UIntSymbol(i, idx_size));
-        noop->insertBefore(block->copy(&map));
-      }
-    } else {
-      for (uint64_t i = low; i <= high; i += stride) {
-        SymbolMap map;
-        map.put(index, new_UIntSymbol(i, idx_size));
-        noop->insertBefore(block->copy(&map));
-      }
-    }
-  }
-  block->replace(loop);
-  makeNoop(loop);
-}
-
+//
 
 static Expr* dropUnnecessaryCast(CallExpr* call) {
   // Check for and remove casts to the original type and size
@@ -4061,6 +4066,7 @@ static FnSymbol* createAndInsertFunParentMethod(CallExpr *call, AggregateType *p
   FnSymbol* parent_method = new FnSymbol("this");
   parent_method->addFlag(FLAG_FIRST_CLASS_FUNCTION_INVOCATION);
   parent_method->insertFormalAtTail(new ArgSymbol(INTENT_BLANK, "_mt", dtMethodToken));
+  parent_method->addFlag(FLAG_METHOD);
   ArgSymbol* thisParentSymbol = new ArgSymbol(INTENT_BLANK, "this", parent);
   thisParentSymbol->addFlag(FLAG_ARG_THIS);
   parent_method->insertFormalAtTail(thisParentSymbol);
@@ -4269,6 +4275,7 @@ createFunctionAsValue(CallExpr *call) {
   FnSymbol *thisMethod = new FnSymbol("this");
   thisMethod->addFlag(FLAG_FIRST_CLASS_FUNCTION_INVOCATION);
   thisMethod->insertFormalAtTail(new ArgSymbol(INTENT_BLANK, "_mt", dtMethodToken));
+  thisMethod->addFlag(FLAG_METHOD);
   ArgSymbol *thisSymbol = new ArgSymbol(INTENT_BLANK, "this", ct);
   thisSymbol->addFlag(FLAG_ARG_THIS);
   thisMethod->insertFormalAtTail(thisSymbol);
@@ -4296,10 +4303,10 @@ createFunctionAsValue(CallExpr *call) {
     thisMethod->insertFormalAtTail(newFormal);
   }
 
-  Vec<CallExpr*> calls;
+  std::vector<CallExpr*> calls;
   collectCallExprs(captured_fn, calls);
 
-  forv_Vec(CallExpr, cl, calls) {
+  for_vector(CallExpr, cl, calls) {
     if (cl->isPrimitive(PRIM_YIELD)) {
       USR_FATAL_CONT(cl, "Iterators not allowed in first class functions");
     }
@@ -4358,9 +4365,9 @@ isOuterVar(Symbol* sym, FnSymbol* fn, Symbol* parent /* = NULL*/) {
 //
 static bool
 usesOuterVars(FnSymbol* fn, Vec<FnSymbol*> &seen) {
-  Vec<BaseAST*> asts;
+  std::vector<BaseAST*> asts;
   collect_asts(fn, asts);
-  forv_Vec(BaseAST, ast, asts) {
+  for_vector(BaseAST, ast, asts) {
     if (toCallExpr(ast)) {
       CallExpr *call = toCallExpr(ast);
 
@@ -4389,9 +4396,10 @@ usesOuterVars(FnSymbol* fn, Vec<FnSymbol*> &seen) {
     if (SymExpr* symExpr = toSymExpr(ast)) {
       Symbol* sym = symExpr->var;
 
-      if (toVarSymbol(sym) || toArgSymbol(sym))
+      if (isLcnSymbol(sym)) {
         if (isOuterVar(sym, fn))
           return true;
+      }
     }
   }
   return false;
@@ -4411,7 +4419,8 @@ isNormalField(Symbol* field)
 
 static CallExpr* toPrimToLeaderCall(Expr* expr) {
   if (CallExpr* call = toCallExpr(expr))
-    if (call->isPrimitive(PRIM_TO_LEADER))
+    if (call->isPrimitive(PRIM_TO_LEADER) ||
+        call->isPrimitive(PRIM_TO_STANDALONE))
       return call;
   return NULL;
 }
@@ -4684,7 +4693,7 @@ preFold(Expr* expr) {
     }
 
     if (SymExpr* sym = toSymExpr(call->baseExpr)) {
-      if (toVarSymbol(sym->var) || toArgSymbol(sym->var)) {
+      if (isLcnSymbol(sym->var)) {
         Expr* base = call->baseExpr;
         base->replace(new UnresolvedSymExpr("this"));
         call->insertAtHead(base);
@@ -4726,7 +4735,7 @@ preFold(Expr* expr) {
         sprintf(field, "x%" PRId64, index);
         result = new SymExpr(base->var->type->getField(field)->type->symbol);
         call->replace(result);
-      } else if (base && (isVarSymbol(base->var) || isArgSymbol(base->var))) {
+      } else if (base && isLcnSymbol(base->var)) {
         //
         // resolve tuple indexing by an integral parameter
         //
@@ -4746,6 +4755,18 @@ preFold(Expr* expr) {
       // No default value yet, so defer resolution of this init
       // primitive until record initializer resolution.
     } else if (call->isPrimitive(PRIM_NO_INIT)) {
+      // Lydia note: fUseNoinit does not control this section.  This was
+      // necessary because with the definition of type defaults in the module
+      // code, return temporary variables would cause an infinite loop by
+      // trying to default initialize within the default initialization
+      // definition.  (It is safe for these temporaries to skip default
+      // initialization, as they will always be assigned a value before they
+      // are returned.)  Thus noinit must remain attached to these temporaries,
+      // even if --no-use-noinit is thrown.  This is an implementation detail
+      // that the user does not need to care about.
+
+      // fUseNoinit controls the insertion of PRIM_NO_INIT statements in the
+      // normalize pass.
       SymExpr* se = toSymExpr(call->get(1));
       INT_ASSERT(se);
       if (!se->var->hasFlag(FLAG_TYPE_VARIABLE))
@@ -4785,8 +4806,6 @@ preFold(Expr* expr) {
           result = call;
           inits.add(call);
         }
-
-        inits.add(call);
       }
 
     } else if (call->isPrimitive(PRIM_TYPEOF)) {
@@ -4794,6 +4813,25 @@ preFold(Expr* expr) {
       if (type->symbol->hasFlag(FLAG_HAS_RUNTIME_TYPE)) {
         result = new CallExpr("chpl__convertValueToRuntimeType", call->get(1)->remove());
         call->replace(result);
+
+        // If this call is inside a BLOCK_TYPE_ONLY, it will be removed and the
+        // runtime type will not be initialized. Unset this bit to fix.
+        //
+        // Assumption: The block we need to modify is either the parent or
+        // grandparent expression of the call.
+        BlockStmt* blk = NULL;
+        if ((blk = toBlockStmt(result->parentExpr))) {
+          // If the call's parent expression is a block, we assume it to
+          // be a scopeless type_only block.
+          INT_ASSERT(blk->blockTag & BLOCK_TYPE);
+        } else {
+          // The grandparent block doesn't necessarily have the BLOCK_TYPE_ONLY
+          // flag.
+          blk = toBlockStmt(result->parentExpr->parentExpr);
+        }
+        if (blk) {
+          (unsigned&)(blk->blockTag) &= ~(unsigned)BLOCK_TYPE_ONLY;
+        }
       }
     } else if (call->isPrimitive(PRIM_QUERY)) {
       Symbol* field = determineQueriedField(call);
@@ -4938,7 +4976,9 @@ preFold(Expr* expr) {
         }
       }
     } else if (call->isPrimitive(PRIM_BLOCK_PARAM_LOOP)) {
-      fold_param_for(call);
+      ParamForLoop* paramLoop = toParamForLoop(call->parentExpr);
+
+      result = paramLoop->foldForResolve();
     } else if (call->isPrimitive(PRIM_LOGICAL_FOLDER)) {
       bool removed = false;
       SymExpr* sym1 = toSymExpr(call->get(1));
@@ -5044,6 +5084,17 @@ preFold(Expr* expr) {
         call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, result));
         call->insertAtTail(tmp);
       }
+    } else if (call->isPrimitive(PRIM_TO_STANDALONE)) {
+      FnSymbol* iterator = call->get(1)->typeInfo()->defaultInitializer->getFormal(1)->type->defaultInitializer;
+     CallExpr* standaloneCall = new CallExpr(iterator->name);
+      for_formals(formal, iterator) {
+        standaloneCall->insertAtTail(new NamedExpr(formal->name, new SymExpr(formal)));
+      }
+      // "tag" should be placed at the end of the formals in the source code as
+      // well, to avoid insertion of an order wrapper.
+      standaloneCall->insertAtTail(new NamedExpr("tag", new SymExpr(gStandaloneTag)));
+      call->replace(standaloneCall);
+      result = standaloneCall;
     } else if (call->isPrimitive(PRIM_TO_LEADER)) {
       FnSymbol* iterator = call->get(1)->typeInfo()->defaultInitializer->getFormal(1)->type->defaultInitializer;
       CallExpr* leaderCall;
@@ -5417,7 +5468,7 @@ requiresImplicitDestroy(CallExpr* call) {
         // These are special functions where we don't want to destroy
         // the result
         !fn->hasFlag(FLAG_NO_IMPLICIT_COPY) &&
-        !fn->hasFlag(FLAG_ITERATOR_FN) &&
+        !fn->isIterator() &&
         !fn->retType->symbol->hasFlag(FLAG_RUNTIME_TYPE_VALUE) &&
         !fn->hasFlag(FLAG_DONOR_FN) &&
         !fn->hasFlag(FLAG_INIT_COPY_FN) &&
@@ -5826,7 +5877,7 @@ static bool is_param_resolved(FnSymbol* fn, Expr* expr) {
     } else if (block->isForLoop() == true) {
       USR_FATAL(expr, "param function cannot contain a non-param for loop");
 
-    } else if (block->blockInfoGet()) {
+    } else if (block->isLoopStmt() == true) {
       USR_FATAL(expr, "param function cannot contain a non-param loop");
     }
   }
@@ -5859,141 +5910,139 @@ static bool is_param_resolved(FnSymbol* fn, Expr* expr) {
 // is true in this case, so the search for a matching elseStmt continue in the
 // surrounding block or call.
 static Expr*
-resolveExpr(Expr* expr)
-{
-    FnSymbol* fn = toFnSymbol(expr->parentSymbol);
+resolveExpr(Expr* expr) {
+  Expr* const origExpr = expr;
+  FnSymbol*   fn       = toFnSymbol(expr->parentSymbol);
 
-    SET_LINENO(expr);
-    if (SymExpr* se = toSymExpr(expr)) {
-      if (se->var) {
-        makeRefType(se->var->type);
-      }
+  SET_LINENO(expr);
+
+  if (SymExpr* se = toSymExpr(expr)) {
+    if (se->var) {
+      makeRefType(se->var->type);
+    }
+  }
+
+  expr = preFold(expr);
+
+  if (fn && fn->retTag == RET_PARAM) {
+    if (is_param_resolved(fn, expr)) {
+      return expr;
+    }
+  }
+
+  if (DefExpr* def = toDefExpr(expr)) {
+    if (def->init) {
+      Expr* init = preFold(def->init);
+      init = resolveExpr(init);
+      // expr is unchanged, so is treated as "resolved".
     }
 
-    Expr* const origExpr = expr;
+    if (def->sym->hasFlag(FLAG_CHPL__ITER)) {
+      implementForallIntents1(def);
+    }
+  }
 
-    expr = preFold(expr);
-
-    if (fn && fn->retTag == RET_PARAM) {
-      if (is_param_resolved(fn, expr)) {
-        return expr;
-      }
+  if (CallExpr* call = toCallExpr(expr)) {
+    if (call->isPrimitive(PRIM_ERROR) ||
+        call->isPrimitive(PRIM_WARNING)) {
+      issueCompilerError(call);
     }
 
-    if (DefExpr* def = toDefExpr(expr))
-    {
-      if (def->init)
-      {
-        Expr* init = preFold(def->init);
-        init = resolveExpr(init);
-        // expr is unchanged, so is treated as "resolved".
-      }
-      if (def->sym->hasFlag(FLAG_CHPL__ITER)) {
-        implementForallIntents1(def);
-      }
-    }
+    // Resolve expressions of the form:  <type> ( args )
+    // These will be constructor calls (or type constructor calls) that slipped
+    // past normalization due to the use of typedefs.
+    if (SymExpr* se = toSymExpr(call->baseExpr)) {
+      if (TypeSymbol* ts = toTypeSymbol(se->var)) {
+        if (call->numActuals() == 0 ||
+            (call->numActuals() == 2 && isSymExpr(call->get(1)) &&
+             toSymExpr(call->get(1))->var == gMethodToken)) {
+          // This looks like a typedef, so ignore it.
 
-    if (CallExpr* call = toCallExpr(expr)) {
-      if (call->isPrimitive(PRIM_ERROR) ||
-          call->isPrimitive(PRIM_WARNING)) {
-        issueCompilerError(call);
-      }
-
-      // Resolve expressions of the form:  <type> ( args )
-      // These will be constructor calls (or type constructor calls) that slipped
-      // past normalization due to the use of typedefs.
-      if (SymExpr* se = toSymExpr(call->baseExpr))
-      {
-        if (TypeSymbol* ts = toTypeSymbol(se->var))
-        {
-          if (call->numActuals() == 0 ||
-              (call->numActuals() == 2 && isSymExpr(call->get(1)) &&
-               toSymExpr(call->get(1))->var == gMethodToken))
-          {
-            // This looks like a typedef, so ignore it.
-          }
-          else
-          {
-            // More needed here ... .
-            INT_FATAL(ts, "not yet implemented.");
-          }
-        }
-      }
-
-      callStack.add(call);
-      resolveCall(call);
-
-      if (!tryFailure && call->isResolved()) {
-        if (CallExpr* origToLeaderCall = toPrimToLeaderCall(origExpr))
-          // ForallLeaderArgs: process the leader that 'call' invokes.
-          implementForallIntents2(call, origToLeaderCall);
-        resolveFns(call->isResolved());
-      }
-
-      if (tryFailure) {
-        if (tryStack.tail()->parentSymbol == fn) {
-          // The code in the 'true' branch of a tryToken conditional has failed
-          // to resolve fully. Roll the callStack back to the function where
-          // the nearest tryToken conditional is and replace the entire
-          // conditional with the 'false' branch then continue resolution on
-          // it.  If the 'true' branch did fully resolve, we would replace the
-          // conditional with the 'true' branch instead.
-          while (callStack.n > 0 &&
-                 callStack.tail()->isResolved() !=
-                 tryStack.tail()->elseStmt->parentSymbol) {
-            callStack.pop();
-          }
-          BlockStmt* block = tryStack.tail()->elseStmt;
-          tryStack.tail()->replace(block->remove());
-          tryStack.pop();
-          if (!block->prev)
-            block->insertBefore(new CallExpr(PRIM_NOOP));
-          expr = block->prev;
-          return expr;
         } else {
-          return NULL;
+          // More needed here ... .
+          INT_FATAL(ts, "not yet implemented.");
         }
       }
-      callStack.pop();
     }
 
-    if (SymExpr* sym = toSymExpr(expr)) {
-      // Avoid record constructors via cast
-      // should be fixed by out-of-order resolution
-      CallExpr* parent = toCallExpr(sym->parentExpr);
-      if (!parent ||
-          !parent->isPrimitive(PRIM_IS_SUBTYPE) ||
-          !sym->var->hasFlag(FLAG_TYPE_VARIABLE)) {
+    callStack.add(call);
 
-        if (AggregateType* ct = toAggregateType(sym->typeInfo())) {
-          if (!ct->symbol->hasFlag(FLAG_GENERIC) &&
-              !ct->symbol->hasFlag(FLAG_ITERATOR_CLASS) &&
-              !ct->symbol->hasFlag(FLAG_ITERATOR_RECORD)) {
-            resolveFormals(ct->defaultTypeConstructor);
-            if (resolvedFormals.set_in(ct->defaultTypeConstructor)) {
-              if (ct->defaultTypeConstructor->hasFlag(FLAG_PARTIAL_COPY))
-                instantiateBody(ct->defaultTypeConstructor);
-              resolveFns(ct->defaultTypeConstructor);
-            }
+    resolveCall(call);
+
+    if (!tryFailure && call->isResolved()) {
+      if (CallExpr* origToLeaderCall = toPrimToLeaderCall(origExpr))
+        // ForallLeaderArgs: process the leader that 'call' invokes.
+        implementForallIntents2(call, origToLeaderCall);
+
+      resolveFns(call->isResolved());
+    }
+
+    if (tryFailure) {
+      if (tryStack.tail()->parentSymbol == fn) {
+        // The code in the 'true' branch of a tryToken conditional has failed
+        // to resolve fully. Roll the callStack back to the function where
+        // the nearest tryToken conditional is and replace the entire
+        // conditional with the 'false' branch then continue resolution on
+        // it.  If the 'true' branch did fully resolve, we would replace the
+        // conditional with the 'true' branch instead.
+        while (callStack.n > 0 &&
+               callStack.tail()->isResolved() !=
+               tryStack.tail()->elseStmt->parentSymbol) {
+          callStack.pop();
+        }
+
+        BlockStmt* block = tryStack.tail()->elseStmt;
+
+        tryStack.tail()->replace(block->remove());
+        tryStack.pop();
+
+        if (!block->prev)
+          block->insertBefore(new CallExpr(PRIM_NOOP));
+
+        return block->prev;
+      } else {
+        return NULL;
+      }
+
+    }
+
+    callStack.pop();
+  }
+
+  if (SymExpr* sym = toSymExpr(expr)) {
+    // Avoid record constructors via cast
+    // should be fixed by out-of-order resolution
+    CallExpr* parent = toCallExpr(sym->parentExpr);
+
+    if (!parent ||
+        !parent->isPrimitive(PRIM_IS_SUBTYPE) ||
+        !sym->var->hasFlag(FLAG_TYPE_VARIABLE)) {
+
+      if (AggregateType* ct = toAggregateType(sym->typeInfo())) {
+        if (!ct->symbol->hasFlag(FLAG_GENERIC) &&
+            !ct->symbol->hasFlag(FLAG_ITERATOR_CLASS) &&
+            !ct->symbol->hasFlag(FLAG_ITERATOR_RECORD)) {
+          resolveFormals(ct->defaultTypeConstructor);
+          if (resolvedFormals.set_in(ct->defaultTypeConstructor)) {
+            if (ct->defaultTypeConstructor->hasFlag(FLAG_PARTIAL_COPY))
+              instantiateBody(ct->defaultTypeConstructor);
+            resolveFns(ct->defaultTypeConstructor);
           }
         }
       }
     }
+  }
 
-    expr = postFold(expr);
-    return expr;
+  return postFold(expr);
 }
 
 
 void
-resolveBlock(Expr* body)
-{
-  for_exprs_postorder(expr, body)
-  {
+resolveBlockStmt(BlockStmt* blockStmt) {
+  for_exprs_postorder(expr, blockStmt) {
     expr = resolveExpr(expr);
 
-    if (tryFailure)
-    {
+    if (tryFailure) {
       if (expr == NULL)
         return;
 
@@ -6021,6 +6070,7 @@ computeReturnTypeParamVectors(BaseAST* ast,
       }
     }
   }
+
   AST_CHILDREN_CALL(ast, computeReturnTypeParamVectors, retSymbol, retTypes, retParams);
 }
 
@@ -6030,7 +6080,7 @@ replaceSetterArgWithTrue(BaseAST* ast, FnSymbol* fn) {
   if (SymExpr* se = toSymExpr(ast)) {
     if (se->var == fn->setter->sym) {
       se->var = gTrue;
-      if (fn->hasFlag(FLAG_ITERATOR_FN))
+      if (fn->isIterator())
         USR_WARN(fn, "setter argument is not supported in iterators");
     }
   }
@@ -6126,7 +6176,7 @@ static void instantiate_default_constructor(FnSymbol* fn) {
 
 
 static void buildValueFunction(FnSymbol* fn) {
-  if (!fn->hasFlag(FLAG_ITERATOR_FN)) {
+  if (!fn->isIterator()) {
     FnSymbol* copy;
     bool valueFunctionExists = fn->valueFunction;
     if (!valueFunctionExists) {
@@ -6199,6 +6249,26 @@ static void resolveReturnType(FnSymbol* fn)
 
 }
 
+// Simple wrappers to check if a function is a specific type of iterator
+static bool isIteratorOfType(FnSymbol* fn, Symbol* iterTag) {
+  if (fn->isIterator()) {
+    for_formals(formal, fn) {
+      if (formal->type == iterTag->type && paramMap.get(formal) == iterTag) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+static bool isLeaderIterator(FnSymbol* fn) {
+  return isIteratorOfType(fn, gLeaderTag);
+}
+static bool isFollowerIterator(FnSymbol* fn) {
+  return isIteratorOfType(fn, gFollowerTag);
+}
+static bool isStandaloneIterator(FnSymbol* fn) {
+  return isIteratorOfType(fn, gStandaloneTag);
+}
 
 void
 resolveFns(FnSymbol* fn) {
@@ -6208,7 +6278,7 @@ resolveFns(FnSymbol* fn) {
   fn->addFlag(FLAG_RESOLVED);
 
   if (fn->hasFlag(FLAG_EXTERN)) {
-    resolveBlock(fn->body);
+    resolveBlockStmt(fn->body);
     resolveReturnType(fn);
     return;
   }
@@ -6217,18 +6287,35 @@ resolveFns(FnSymbol* fn) {
     return;
 
   //
-  // mark leaders for inlining
+  // Mark serial loops that yield inside of follower and standalone iterators
+  // as order independent. By using a forall loop, a user is asserting that
+  // their loop is order independent. Here we just mark the serial loops inside
+  // of the "follower" with this information. Note that only loops that yield
+  // are marked since other loops are not necessarily order independent. Only
+  // the inner most loop of a loop nest will be marked.
   //
-  if (fn->hasFlag(FLAG_ITERATOR_FN)) {
-    for_formals(formal, fn) {
-      if (formal->type == gLeaderTag->type &&
-          paramMap.get(formal) == gLeaderTag) {
-        fn->addFlag(FLAG_INLINE_ITERATOR);
-        // need to do the following before 'fn' gets resolved
-        stashPristineCopyOfLeaderIter(fn, /*ignore_isResolved:*/ true);
-        break;
+  if (isFollowerIterator(fn) || isStandaloneIterator(fn)) {
+    std::vector<CallExpr*> callExprs;
+    collectCallExprs(fn->body, callExprs);
+
+    for_vector(CallExpr, call, callExprs) {
+      if (call->isPrimitive(PRIM_YIELD)) {
+        if (LoopStmt* loop = LoopStmt::findEnclosingLoop(call)) {
+          if (loop->isCoforallLoop() == false) {
+            loop->orderIndependentSet(true);
+          }
+        }
       }
     }
+  }
+
+  //
+  // Mark leader and standalone parallel iterators for inlining. Also stash a
+  // pristine copy of the iterator (required by forall intents)
+  //
+  if (isLeaderIterator(fn) || isStandaloneIterator(fn)) {
+    fn->addFlag(FLAG_INLINE_ITERATOR);
+    stashPristineCopyOfLeaderIter(fn, /*ignore_isResolved:*/ true);
   }
 
   if (fn->retTag == RET_REF) {
@@ -6237,7 +6324,7 @@ resolveFns(FnSymbol* fn) {
 
   insertFormalTemps(fn);
 
-  resolveBlock(fn->body);
+  resolveBlockStmt(fn->body);
 
   if (tryFailure) {
     fn->removeFlag(FLAG_RESOLVED);
@@ -6268,27 +6355,7 @@ resolveFns(FnSymbol* fn) {
     }
   }
 
-  //
-  // mark leaders for inlining
-  //
-  // The original computation used to be here, now we do it earlier,
-  // here we only verify that we did not miss a leader.
-  // todo: convert this to an assertion; perhaps factor out the common code
-  // with the above.
-  //
-  if (fn->hasFlag(FLAG_ITERATOR_FN) &&
-      !fn->hasFlag(FLAG_INLINE_ITERATOR))
-  {
-    for_formals(formal, fn) {
-      if (formal->type == gLeaderTag->type &&
-          paramMap.get(formal) == gLeaderTag) {
-        // oops
-        INT_ASSERT(false);
-      }
-    }
-  }
-
-  if (fn->hasFlag(FLAG_ITERATOR_FN) && !fn->iteratorInfo) {
+  if (fn->isIterator() && !fn->iteratorInfo) {
     protoIteratorClass(fn);
   }
 
@@ -6654,7 +6721,7 @@ static void resolveExternVarSymbols()
     // type block that initializes the variable.
     BlockStmt* block = toBlockStmt(init);
     if (block)
-      resolveBlock(block);
+      resolveBlockStmt(block);
   }
 }
 
@@ -6729,10 +6796,18 @@ resolve() {
 
   resolveExternVarSymbols();
 
-  resolveUses(mainModule);
-  resolveUses(printModuleInitModule);
+  // --ipe does not build a mainModule
+  if (mainModule)
+    resolveUses(mainModule);
 
-  resolveFns(chpl_gen_main);
+  // --ipe does not build printModuleInitModule
+  if (printModuleInitModule)
+    resolveUses(printModuleInitModule);
+
+  // --ipe does not build chpl_gen_main
+  if (chpl_gen_main)
+    resolveFns(chpl_gen_main);
+
   USR_STOP();
 
   resolveExports();
@@ -7283,7 +7358,7 @@ static void insertReturnTemps() {
                 ((fn->retType->getValType() &&
                   isSyncType(fn->retType->getValType())) ||
                  isSyncType(fn->retType) ||
-                 fn->hasFlag(FLAG_ITERATOR_FN))) {
+                 fn->isIterator())) {
               CallExpr* sls = new CallExpr("_statementLevelSymbol", tmp);
               call->insertBefore(sls);
               reset_ast_loc(sls, call);
@@ -7348,6 +7423,8 @@ static void
 pruneResolvedTree() {
 
   removeUnusedFunctions();
+  if (fRemoveUnreachableBlocks)
+    deadBlockElimination();
   removeRandomPrimitives();
   replaceTypeArgsWithFormalTypeTemps();
   removeParamArgs();
@@ -7361,6 +7438,17 @@ pruneResolvedTree() {
   removeWhereClauses();
   removeMootFields();
   expandInitFieldPrims();
+  removeCompilerWarnings();
+}
+
+static void clearDefaultInitFns(FnSymbol* unusedFn) {
+  // Before removing an unused function, check if it is a defaultInitializer.
+  // If unusedFn is a defaultInitializer, its retType's defaultInitializer
+  // field will be unusedFn. Set the defaultInitializer field to NULL so the
+  // removed function doesn't leave behind a garbage pointer.
+  if (unusedFn->retType->defaultInitializer == unusedFn) {
+    unusedFn->retType->defaultInitializer = NULL;
+  }
 }
 
 static void removeUnusedFunctions() {
@@ -7368,8 +7456,22 @@ static void removeUnusedFunctions() {
   forv_Vec(FnSymbol, fn, gFnSymbols) {
     if (fn->hasFlag(FLAG_PRINT_MODULE_INIT_FN)) continue;
     if (fn->defPoint && fn->defPoint->parentSymbol) {
-      if (! fn->isResolved() || fn->retTag == RET_PARAM)
+      if (! fn->isResolved() || fn->retTag == RET_PARAM) {
+        clearDefaultInitFns(fn);
         fn->defPoint->remove();
+      }
+    }
+  }
+}
+
+static void removeCompilerWarnings() {
+  // Warnings have now been issued, no need to keep the function around.
+  // Remove calls to compilerWarning and let dead code elimination handle
+  // the rest.
+  typedef MapElem<FnSymbol*, const char*> FnSymbolElem;
+  form_Map(FnSymbolElem, el, innerCompilerWarningMap) {
+    forv_Vec(CallExpr, call, *(el->key->calledBy)) {
+      call->remove();
     }
   }
 }
@@ -7382,6 +7484,10 @@ isUnusedClass(AggregateType *ct) {
 
   // Runtime types are assumed to be always used.
   if (ct->symbol->hasFlag(FLAG_RUNTIME_TYPE_VALUE))
+    return false;
+
+  // Uses of iterator records get inserted in lowerIterators
+  if (ct->symbol->hasFlag(FLAG_ITERATOR_RECORD))
     return false;
 
   // FALSE if initializers are used
@@ -7896,9 +8002,9 @@ static void replaceReturnedValuesWithRuntimeTypes()
 }
 
 
-static void replaceInitPrims(Vec<BaseAST*>& asts)
+static void replaceInitPrims(std::vector<BaseAST*>& asts)
 {
-  forv_Vec(BaseAST, ast, asts) {
+  for_vector(BaseAST, ast, asts) {
     if (CallExpr* call = toCallExpr(ast)) {
       // We are only interested in INIT primitives.
       if (call->isPrimitive(PRIM_INIT)) {
@@ -7986,12 +8092,12 @@ static void replaceInitPrims(Vec<BaseAST*>& asts)
 
 
 static void insertRuntimeInitTemps() {
-  Vec<BaseAST*> asts;
+  std::vector<BaseAST*> asts;
   collect_asts_postorder(rootModule, asts);
 
   // Collect asts which are definitions of VarSymbols that are type variables
   // and are flagged as runtime types.
-  forv_Vec(BaseAST, ast, asts) {
+  for_vector(BaseAST, ast, asts) {
     if (DefExpr* def = toDefExpr(ast)) {
       if (isVarSymbol(def->sym) &&
           def->sym->hasFlag(FLAG_TYPE_VARIABLE) &&
@@ -8011,8 +8117,8 @@ static void insertRuntimeInitTemps() {
 
   replaceInitPrims(asts);
 
-  forv_Vec(BaseAST, ast, asts) {
-    if (SymExpr* se = toSymExpr(ast)) {
+  for_vector(BaseAST, ast1, asts) {
+    if (SymExpr* se = toSymExpr(ast1)) {
 
       // remove dead type expressions
       if (se->getStmtExpr() == se)

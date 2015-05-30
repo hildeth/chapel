@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -142,6 +142,13 @@ bool AstLogger::enterForLoop(ForLoop* node) {
 }
 
 void AstLogger::exitForLoop(ForLoop* node) {
+}
+
+bool AstLogger::enterParamForLoop(ParamForLoop* node) {
+  return true;
+}
+
+void AstLogger::exitParamForLoop(ParamForLoop* node) {
 }
 
 bool AstLogger::enterCondStmt(CondStmt* node) {

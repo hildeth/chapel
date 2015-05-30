@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -34,6 +34,7 @@
 #include "DoWhileStmt.h"
 #include "CForLoop.h"
 #include "ForLoop.h"
+#include "ParamForLoop.h"
 
 #include <cstdio>
 #include <inttypes.h>
@@ -85,7 +86,6 @@ void AstDumpToHtml::view(const char* passName) {
 
   forv_Vec(ModuleSymbol, module, allModules) {
     if (fdump_html_include_system_modules == true      ||
-        module->modTag                    == MOD_MAIN  ||
         module->modTag                    == MOD_USER) {
       AstDumpToHtml logger;
 
@@ -496,6 +496,30 @@ bool AstDumpToHtml::enterCForLoop(CForLoop* node) {
 }
 
 void AstDumpToHtml::exitCForLoop(CForLoop* node) {
+  fprintf(mFP, "}");
+  printBlockID(node);
+  fprintf(mFP, "</DL>\n");
+}
+
+
+//
+// ParamForLoop
+//
+bool AstDumpToHtml::enterParamForLoop(ParamForLoop* node) {
+  fprintf(mFP, "<DL>\n");
+
+  if (FnSymbol* fn = toFnSymbol(node->parentSymbol))
+    if (node == fn->where)
+      fprintf(mFP, "<B>where</B>\n");
+
+  fprintf(mFP, "<B>ParamForLoop<B> {");
+
+  printBlockID(node);
+
+  return true;
+}
+
+void AstDumpToHtml::exitParamForLoop(ParamForLoop* node) {
   fprintf(mFP, "}");
   printBlockID(node);
   fprintf(mFP, "</DL>\n");

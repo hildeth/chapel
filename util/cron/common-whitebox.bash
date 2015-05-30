@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 #
-# Configure environment for a particular configuration for whitebox testing.
+# Configure environment for a particular configuration for whitebox testing. To
+# use this outside of nightly testing, set these two variables in the
+# environment:
+#
+# Variable   Values
+# ------------------------------------------------------
+# COMPILER    cray, intel, pgi, gnu
+# COMP_TYPE   TARGET, HOST-TARGET, HOST-TARGET-no-PrgEnv
+#
+# Optionally, the platform can be set with:
+#
+# CRAY_PLATFORM_FROM_JENKINS
+#
+# The default is cray-xc. cray-xe is the other valid option.
 
 CWD=$(cd $(dirname ${BASH_SOURCE[0]}) ; pwd)
 source $CWD/functions.bash
@@ -114,6 +127,11 @@ my_arch=$($CHPL_HOME/util/chplenv/chpl_arch.py 2> /dev/null)
 if [ "${my_arch}" = "none" ] ; then
     log_info "Loading craype-shanghai module to stifle chpl_arch.py warnings."
     module load craype-shanghai
+fi
+
+if [ "${COMP_TYPE}" != "HOST-TARGET-no-PrgEnv" ] ; then
+    log_info "Loading fftw module."
+    module load fftw
 fi
 
 log_info "Current loaded modules:"

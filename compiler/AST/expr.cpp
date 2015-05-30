@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -125,6 +125,20 @@ bool Expr::isStmt() const {
   return false;
 }
 
+// IPE: Provide the name of the symbol/variable being defined
+const char* DefExpr::name() const {
+  const char* retval = 0;
+
+  if (isLcnSymbol(sym)    == true ||
+      isTypeSymbol(sym)   == true ||
+      isFnSymbol(sym)     == true ||
+      isModuleSymbol(sym) == true) {
+    retval = sym->name;
+  }
+
+  return retval;
+}
+
 // Return true if this expression is a ModuleDefinition i.e. it
 // is a DefExpr and the referenced symbol is a Module Symbol
 
@@ -199,7 +213,7 @@ Expr* Expr::getStmtExpr() {
 }
 
 Expr* Expr::getNextExpr(Expr* expr) {
-  return NULL;
+  return this;
 }
 
 void Expr::verify() {
@@ -268,32 +282,30 @@ void Expr::prettyPrint(std::ostream *o) {
 }
 
 Expr* Expr::remove() {
-  if (this != NULL) {
-    if (list) {
-      if (next)
-        next->prev = prev;
-      else
-        list->tail = prev;
+  if (list) {
+    if (next)
+      next->prev = prev;
+    else
+      list->tail = prev;
 
-      if (prev)
-        prev->next = next;
-      else
-        list->head = next;
+    if (prev)
+      prev->next = next;
+    else
+      list->head = next;
 
-      list->length--;
+    list->length--;
 
-      next = NULL;
-      prev = NULL;
-      list = NULL;
-    } else {
-      callReplaceChild(this, NULL);
-    }
+    next = NULL;
+    prev = NULL;
+    list = NULL;
+  } else {
+    callReplaceChild(this, NULL);
+  }
 
-    if (parentSymbol) {
-      remove_help(this, 'r');
-    } else {
-      trace_remove(this, 'R');
-    }
+  if (parentSymbol) {
+    remove_help(this, 'r');
+  } else {
+    trace_remove(this, 'R');
   }
 
   return this;
@@ -370,6 +382,36 @@ void Expr::insertAfter(Expr* new_ast) {
   if (parentSymbol)
     sibling_insert_help(this, new_ast);
   list->length++;
+}
+
+
+void
+Expr::replace(const char* format, ...) {
+  va_list args;
+
+  va_start(args, format);
+  replace(new_Expr(format, args));
+  va_end(args);
+}
+
+
+void
+Expr::insertBefore(const char* format, ...) {
+  va_list args;
+
+  va_start(args, format);
+  insertBefore(new_Expr(format, args));
+  va_end(args);
+}
+
+
+void
+Expr::insertAfter(const char* format, ...) {
+  va_list args;
+
+  va_start(args, format);
+  insertAfter(new_Expr(format, args));
+  va_end(args);
 }
 
 
@@ -1828,7 +1870,7 @@ GenRet codegenLocalDeref(GenRet r)
   // (instead of running codegenDeref with chplType=type->refType )
   ret = codegenValue(r);
   ret.isLVPtr = GEN_PTR;
-  if( r.chplType ) ret.chplType = r.chplType->getValType(); 
+  if( r.chplType ) ret.chplType = r.chplType->getValType();
   return ret;
 }
 
@@ -3478,7 +3520,7 @@ Expr* CallExpr::getFirstExpr() {
     retval = baseExpr->getFirstExpr();
 
   else if (argList.head != NULL)
-    retval = argList.head;
+    retval = argList.head->getFirstExpr();
 
   else
     retval = this;
@@ -3487,7 +3529,7 @@ Expr* CallExpr::getFirstExpr() {
 }
 
 Expr* CallExpr::getNextExpr(Expr* expr) {
-  Expr* retval = NULL;
+  Expr* retval = this;
 
   if (expr == baseExpr && argList.head != NULL)
     retval = argList.head->getFirstExpr();
@@ -3666,8 +3708,9 @@ void CallExpr::prettyPrint(std::ostream *o) {
         *o << "*(";
         argList.last()->prettyPrint(o);
         *o << ")";
-      } else if (strcmp(expr->unresolved, 
-                        "_build_range") == 0) {
+      } else if (strcmp(expr->unresolved, "chpl_build_bounded_range") == 0 ||
+                 strcmp(expr->unresolved, "chpl_build_partially_bounded_range") == 0 ||
+                 strcmp(expr->unresolved, "chpl_build_unbounded_range") == 0) {
         argList.first()->prettyPrint(o);
         *o << "..";
         argList.last()->prettyPrint(o);
@@ -5878,14 +5921,9 @@ Expr* getNextExpr(Expr* expr) {
   if (expr->next) {
     retval = expr->next->getFirstExpr();
 
-  } else if (expr->parentExpr == NULL) {
-    retval = NULL;
+  } else if (Expr* parent = expr->parentExpr) {
+    retval = parent->getNextExpr(expr);
 
-  } else {
-    retval = expr->parentExpr->getNextExpr(expr);
-
-    if (retval == NULL)
-      retval = expr->parentExpr;
   }
 
   return retval;
@@ -5899,6 +5937,116 @@ isIdentifierChar(const char c) {
           (c == '$') ||
           (c == '_') || (c == '.'));
 }
+
+
+/*********** new_Expr() ***********/
+/*
+
+new_Expr() lets you build AST more succinctly.
+
+You can call new_Expr() directly, or implicitly by calling:
+
+  BlockStmt::insertAtHead
+  BlockStmt::insertAtTail
+  FnSymbol::insertAtHead
+  FnSymbol::insertAtTail
+  Expr::insertBefore
+  Expr::insertAfter
+  Expr::replace
+
+Synopsis:
+
+  new_Expr(const char* format, ...)
+
+The format string should contain a Chapel statement or expression.
+
+SIMPLE CALLS
+
+The code
+
+  block->insertAtTail("foo()");
+
+is equivalent to
+
+  block->insertAtTail(new CallExpr("foo"));
+
+USING SYMBOLS AND EXPRESSIONS
+
+Symbols and expressions can be added to the newly created expressions
+using %S and %E format flags.  For example, given:
+
+  VarSymbol* tmp;
+  CallExpr* call;
+
+the code
+
+  block->insertAtTail("foo(%S)", tmp);
+  block->insertAtTail("foo(%E)", call);
+
+is equivalent to
+
+  block->insertAtTail(new CallExpr("foo", tmp));
+  block->insertAtTail(new CallExpr("foo", call));
+
+PRIMITIVES
+
+Primitives can be defined by enclosing the name of the primitive in
+apostrophes.  So the code
+
+  block->insertAtTail("'move'(%S, new CallExpr("foo"))");
+
+is equivalent to
+
+  block->insertAtTail(new CallExpr(PRIM_MOVE, tmp, new CallExpr("foo")));
+
+STRING LITERALS
+
+String literals are also supported by enclosing a string in
+apostrophes.
+
+BLOCK STATEMENTS
+
+Finally, block statements and type block statements
+(BlockStmt::blockTag == BLOCK_TYPE) are supported
+via curly brackets and semicolons. For example:
+
+  new_Expr("{TYPE 'move'(%S, iteratorIndex(%S)) }", followIdx, followIter);
+
+METHOD CALLS
+
+Note that AST represents method calls differently before and after normalize.
+
+Here are examples before normalize:
+
+  // localOp.accumulate(followIdx)
+  new_Expr(".(%S, 'accumulate')(%S)", localOp, followIdx);
+
+  // globalOp.generate()
+  new_Expr(".(%S, 'generate')()", globalOp);
+
+  // Paren-less calls are perhaps done so: localOp.identity
+  new_Expr(".(%S, 'identity')", localOp);
+
+After normalize method calls are represented as procedure calls with
+the first argument being gMethodToken:
+
+  // rvar.identity
+  new_Expr("identity(%S,%S)", gMethodToken, rvar);
+
+  // rvar.accumulate(svar)
+  new_Expr("accumulate(%S,%S,%S)", gMethodToken, rvar, svar);
+
+FINAL EXAMPLE
+
+The code
+
+  leadBlock->insertAtTail(new CallExpr(PRIM_MOVE, leadIter, new CallExpr("_getIterator", new CallExpr("_toLeader", iter))));
+
+can be written as
+
+  leadBlock->insertAtTail("'move'(%S, _getIterator(_toLeader(%S)))", leadIter, iter);
+
+*/
 
 Expr*
 new_Expr(const char* format, ...) {

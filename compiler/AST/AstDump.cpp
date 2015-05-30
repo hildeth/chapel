@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2015 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -33,13 +33,24 @@
 #include "DoWhileStmt.h"
 #include "CForLoop.h"
 #include "ForLoop.h"
+#include "ParamForLoop.h"
 
 AstDump::AstDump() {
   mName      =     0;
   mPath      =     0;
   mFP        =     0;
   mIndent    =     0;
-  mNeedSpace = false;
+  mNeedSpace   = false;
+  mDontCloseFP = false;
+}
+
+AstDump::AstDump(FILE* fp) {
+  mName      =     0;
+  mPath      =     0;
+  mFP        =     fp;
+  mIndent    =     0;
+  mNeedSpace   = false;
+  mDontCloseFP = true;
 }
 
 AstDump::~AstDump() {
@@ -79,6 +90,9 @@ bool AstDump::open(const ModuleSymbol* module, const char* passName, int passNum
 
 bool AstDump::close() {
   bool retval = false;
+
+  if (mDontCloseFP)
+    mFP = 0;
 
   if (mFP != 0 && fclose(mFP) == 0) {
     mFP    =    0;
@@ -381,6 +395,33 @@ bool AstDump::enterCForLoop(CForLoop* node) {
 }
 
 void AstDump::exitCForLoop(CForLoop* node) {
+  --mIndent;
+  newline();
+  write(false, "}", true);
+  printBlockID(node);
+}
+
+
+//
+// ParamForLoop
+//
+bool AstDump::enterParamForLoop(ParamForLoop* node) {
+  newline();
+
+  if (FnSymbol* fn = toFnSymbol(node->parentSymbol))
+    if (node == fn->where)
+      write(false, "where ", false);
+
+  write("ParamForLoop");
+  newline();
+  write("{");
+  printBlockID(node);
+  ++mIndent;
+
+  return true;
+}
+
+void AstDump::exitParamForLoop(ParamForLoop* node) {
   --mIndent;
   newline();
   write(false, "}", true);
