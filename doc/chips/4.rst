@@ -36,25 +36,41 @@ Revision History
 Rationale
 ---------
 
-Improvement of automated memory management (AMM) in Chapel forces a distinction
-between initialization and assignment.  In a constructor, relying on
-default-initialization of fields followed by assignment is inefficient.  Adding
-syntax for explicit field initialization removes that inefficiency.  This optimization is
-expanded to include variable declarations as well.
-The specification and implementation of ``const``-ness with respect to
-objects and their fields is simplified.
+Several problems exist with the current implementation of class and record
+initialization, which we term the "constructor story": no distinction is made
+between initialization and assignment; the
+semantics of method calls within constructors is not well-specified; and some
+desirable behaviors exhibited by compiler-supplied constructors are not
+available in user-supplied constructors.
 
+Recent improvements in the automated memory management (AMM) implementation in
+Chapel (a separate effort) forces a distinction between initialization and
+assignment.  This new distinction causes the current implementation to be
+modified in such a way that fields are first default-initialzed and then
+overwritten (though assignment) with the final value the constructor intends
+them to have.  If this inefficiency is to be avoided, the syntax for
+constructors must be augmented to allow field-initializations to be specified
+explicitly.  Moreover, in some cases (for example if a field is declared to be
+``const``) the behavior desired by the programmer cannot be obtained using the
+existing syntax and semantics.  
+
+Adding new field-initialization syntax supports a clarification of the
+effect of ``const`` declarations, the degree to which dynamic dispatch is
+supported in constructors and its associated semantics.
 A further goal of this proposal is to clarify the semantics of
-initialization for objects of derived types.  Some programs compiled with the current
-implementation exhibit undesirable behavior.  Stating the expected behavior clearly is a
-first step toward replacing the current behavior with more reasonable semantics.
+initialization for objects of derived types.  
 
-Two brief examples follow, to briefly show the differences between existing and proposed
-constructors.  A further example follows, to show the undesirable behavior this
-proposal seeks to correct.
+Examples -- Existing Syntax and Semantics
++++++++++++++++++++++++++++++++++++++++++
 
-Example -- Existing Syntax and Semantics
-++++++++++++++++++++++++++++++++++++++++++++++
+Some programs compiled with the current implementation exhibit inconsistent or undesirable
+behavior.  Some examples follow, accompanied by an explanation of why the
+observed behavior differs from expectations.  To be fair, the expectations being
+stated are part of the proposal, so agreeing with the proposal depends to a
+large extent upon accepting those premises.
+
+Example (Existing) -- Initialization by Assignment is Inefficient
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 An example of how a record constructor is currently written::
 
@@ -103,48 +119,73 @@ default field values with other values.
 
 If the fields are of fairly simple types, then this default-initialization followed by
 assignment is not so bad.  But when the types are complex or the assignment operator
-expensive, then it adversely affects performance.
+expensive, then it adversely affects performance.  
+
+The current proposal adds a field-initializer-clause to the syntax for a
+constructor.  The field-initialization-clause allows field-initialization to be
+expressed as initialization (not assignment).  Therefore, the semantics
+expressed by a constructor no longer require each field to be
+default-initialized and then updated through assignment.
+
+Because initialization can and should be performed only once for each field,
+fields that are initialized explicitly in the field-initializer-clause need not
+be default-initialized.  The proposed syntax for field-initializers is
+sufficiently expressive that in most cases a subsequent update (througn
+assignment) of the same field in the body of the constructor will not be
+necessary.  However, this is still supported if the coder chooses to express
+construction in that way.  This property also means that an implementation
+supporting this proposal should support existing constructors in a
+backward-compatible manner.
 
 
-Example -- Proposed Syntax and Semantics
-++++++++++++++++++++++++++++++++++++++++
+Example (Existing) -- Special Interpretation of ``const`` Required
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-An example of how a record constructor would be written under this proposal::
+Given a record such as::
 
    record R {
-     var i = 10;
-     var r:real;
-     var b:bool;
-
-     proc R(s:real)
-     init(r = s) {}
+     const i = 42;
    }
 
-   var t = new R(7.0);
-   writeln(r);         // Prints: "(i = 10, r = 7.0, b = false)".
+within the context of a constructor, it is currently permissible to update the
+value of a field declared to be ``const``, as in::
 
-The user-visible semantics of this example are the same as for the one above.  However,
-there are two important differences in the implementation.  The ``=`` appearing in the
-``init`` clause causes field ``r`` to be *initialized* with the value ``s``.  This
-replaces the default-initialization of ``r`` followed by assignment from ``s`` with a
-simple copy-initialization from ``s``.  The syntax for the initialization of ``t`` remains
-the same, but the initialization is performed in-place, so the above bitwise copy is avoided.
+   proc R.R(j:int) {
+     i = j; // OK.
+   }
 
-In more detail, space for ``t`` is allocated.  The constructor is then invoked on ``t`` as a
-method.  It first executes the ``init`` clause.  This clause causes field ``t.r`` to be
-initialized using the value of ``s``.  After all explicit field initializations appearing
-in the ``init`` clause have been executed, the uninitialized fields in ``t`` are
-initialized in lexical order (according to the order in which they appear in the
-declaration of ``record R``).  The first such field is ``i``.  Since a field-default value
-of "10" is supplied, that value is used to initialize ``i``.  Since ``r`` has already been
-initialized, it is skipped.  Since there is no field-default value for ``b``, it is
-initialized using its type-default value "false".  Then, control is transferred to the
-body of the constructor, which in this case is empty.  Since ``t`` is initialized
-in-place, no bitwise copy is required after construction.
+whereas in any other method on an object of type ``R``, such an assignment is
+illegal::
+
+   proc R.foo(j: int) {
+     i = j; // Illegal.
+   }
+
+One could argue that since constructors are "special", it is acceptable to have
+special behavior associated with ``const`` fields when they are accessed in a
+constructor.  
+
+But this interpretation creates other problems.  Suppose that a constructor
+calls a helper method that updates the const field.  A call to this method is
+okay within the context of a constructor, but illegal elsewhere.  Since methods
+that modify ``const`` fields cannot flagged as erroneous without reference to
+their calling contexts, the compiler must initially accept them as valid.  Then
+for each function resolved, the compiler must potentially examine the entire
+call tree below it to determine if the ``const`` property of a field is being
+violated.
+
+In contrast, the present proposal would make it illegal to modify the value of a
+const field in the body of *any* routine -- constructors included.  The
+field-initializer syntax provides the means to establish the initial value of a
+``const`` field.  Thereafter, the value of that field would be immutable.
+
+To the extent that the proposal would make it easier to determine that an
+update of a ``const`` field is invalid, it also makes it easier for a programmer
+to reason about whether a particular call will be valid.
 
 
-Example -- Existing Undesirable Behavior
-++++++++++++++++++++++++++++++++++++++++
+Example (Existing) -- Inconsistent Derived-Class Field Initialization
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 The following code::
 
@@ -195,6 +236,246 @@ means that initialization of the base-class sub-object will use the static type
 of the base-class sub-object when dispatching to any methods called in the body of any of base-class
 constructor.  That means that we will end up with the second behavior: Both base-
 and derived-class objects will end up with their ``x`` fields initialized to 1.
+
+Example (Existing) -- Record-Default Initialization Not Performed
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+When compiled with the current implementation, the following code::
+
+   record R {
+     var n: int;
+     var A: [1..n] int;
+   }
+   var r = new R(5);
+   writeln(r.A.domain);
+
+prints out "1..5" as expected.  However, if the user adds the constructor::
+
+   proc R.R(new_n: int) {
+     n = new_n;
+   }
+
+then when the constructor is run, the field ``A`` is initialized using it
+type-default value -- an empty array of ``int``.  In that case, the writeln prints
+out an empty line.  The user might have expected ``A`` to instead be initialized
+according to the record-default value.  This would result in the same behavior
+as for the case when the constructor is missing.
+
+The main problem here is that there is no way for the user to specify that he
+wants to inherit the record-default initialization from the record declaration.
+
+The current proposal solves this problem by stating that record-default
+initialization is used unless the initialization of a field is explicitly
+overridden in the initializer list.  This will provide behavior that is more
+consisten with that of the current compiler-supplied all-fields constructor.
+
+
+Examples -- Proposed Syntax and Semantics
++++++++++++++++++++++++++++++++++++++++++
+
+Examples using the new syntax and semantics follow.  Each example shows how the
+proposed syntax and semantics address the problems demonstrated by the examples
+in the previous section.
+
+
+Example (Proposed) -- Initialization by Assignment is Inefficient
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+If initialization by assignment is inefficient, the cure is to not use
+assignment.  By providing explicit field-initialization syntax, the proposed
+syntax allows the programmer to avoid that apparent inefficiency.
+
+The above example, rewritten using the new syntax is::
+
+   record R {
+     var i = 10;
+     var r:real;
+     var b:bool;
+
+     proc R(s:real)
+     init (r = s)  // <- This is the new field-initialization clause.
+     {}            // <- the constructor body is now empty.
+   }
+
+   var t = new R(7.0);
+   writeln(r);         // Prints: "(i = 10, r = 7.0, b = false)".
+
+The observable behavior of this example is the same as for the one above.  
+However, this is due to the fact that initialization and assignment are
+indistinguishable for fundamental types.  If field ``r`` were of a record type
+whose assignment and copy operations differed, there would be an observable
+difference between the two.
+
+In the above (existing) example, the compiler would inserts call to
+default-initialize ``r``, setting the value of ``r`` to the value returned by
+``_defaultOf(r.type)``.  It then calls ``=(r, s)`` which invokes an assignment
+operator that can bind ``r`` as its left operand and ``s`` as its right operand.
+In contrast, the current example initializes ``r`` to the value of ``s`` by invoking
+(as a method) a constructor of ``r.type`` than can bind to ``s`` as its argument.
+
+Viewing the semantics of the constructor as a whole, space for ``t`` is allocated.
+The constructor is then invoked on ``t`` as a
+method.  It first executes the ``init`` clause.  This clause causes field ``t.r`` to be
+initialized using the value of ``s``.  After all explicit field initializations appearing
+in the ``init`` clause have been executed, the uninitialized fields in ``t`` are
+initialized in lexical order (according to the order in which they appear in the
+declaration of ``record R``).  The first such field is ``i``.  Since a field-default value
+of "10" is supplied, that value is used to initialize ``i``.  Since ``r`` has already been
+initialized, it is skipped.  Since there is no field-default value for ``b``, it is
+initialized using its type-default value "false".  Then, control is transferred to the
+body of the constructor, which in this case is empty.  Since ``t`` is initialized
+in-place, no bitwise copy is required after construction.
+
+Example (Proposed) -- Special Interpretation of ``const`` Required
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+According to this proposal, fields declared to be ``const`` may be initialized
+explicitly in the field-initializer-clause.  Otherwise, the class-or-record
+default initializer expression is used, if present.  If not, then the
+type-default value is used to initialize that field.  After the field is
+initialized, it becomes immutable.
+
+One of the above three initializations will be used by the time control reaches
+the end of the field-initializer-clause in a constructor.  This means that in
+the body of a constructor, fields declared to be ``const`` are immutable.
+Therefore, the treatment of ``const`` fields is the same in the body of a
+constructor as in the body of any other function.  Importantly, whether a field
+is treated as mutable in a function or method is consistent, irrespecitive of
+how it is called:  Namely, a ``const`` field is treated as immutable everywhere
+outside of a field-initializer-clause.
+
+The constructor as written in the corresponding example above now becomes illegal::
+
+   proc R.R(j:int) {
+     i = j; // Illegal -- cannot assign to i.
+   }
+
+The interpretation of this is that since the field-initializer-clause was
+omitted from this constructor declaration, the field ``i`` is
+default-initialized according to the class declaration (giving it a value of
+42).  After it is initialized, it becomes immutable, so the attempt to overwrite
+it with ``j`` fails (at compile time).
+
+To get the desired behavior under the proposal, one would write::
+
+   proc R.R(j:int)
+   init (i = j)
+   { }
+
+This tells the compiler to initialize ``i`` by calling the constructor that is
+effectively ``(i.type).(i.type)(j)``.  The body of the constructor is empty: the
+value of ``i`` has been established and cannot be altered there.
+
+The declaration of ``R.foo()`` above is still illegal, and now the compiler can
+diagnose it as illegal without reference to whether it is called in the context
+of a constructor.  This is true because (under this proposal) methods and
+functions on cannot be invoked on an object before all of its fields have been
+initialized.  This follows from the restriction that ``this`` cannot be
+referenced explicitly or implicitly in the context of a field-initializer-clause.
+
+
+Example (Proposed) -- Inconsistent Derived-Class Field Initialization
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Under this proposal expected output of the above inheritance example is::
+
+   {x = 1}
+   {x = 1}
+
+The reason for this, is that the behavior of the compiler-supplied constructor
+(called by _defaultOf()) for the derived class ``SubC`` is effectively::
+
+   proc SubC.SubC()
+   init (super = new C())
+   { }
+
+Execution proceeds by first initializing the base-class sub-object ``super`` (of
+type C) by calling its zero-argument constructor directly.  (The
+compiler-supplied version would instead call ``_defaultOf()``.)  This invocation
+of ``proc C.C()`` initializes ``super`` by first default-initializing its field
+``x`` to ``0`` and then calling ``myfunc()``.  Execution of ``myfunc()`` updates the
+value of ``super.x`` to ``1`` (by assignment).  Control then returns to the body
+of the constructor for ``SubC``, which is empty.
+
+The reason why ``C.myfunc()`` is called to initialize the field ``x`` is that
+``myfunc()`` is invoked in the body of the constructor for type ``C`` which is
+called on the ``super`` sub-object of the ``SubC`` being constructed, not on the
+``SubC`` as a whole.  Two things prevent this call to ``myfunc()`` from
+dispatching dynamically to the object as a whole:
+
+1. The layout of derived objects is left unspecified by this proposal, so it is
+   not necessarily the case that the address of the base-class sub-object
+   coincides with the address of the object as a whole, nor that the runtime
+   type information of the two objects is shared.
+
+2. Even if the runtime type information is shared, the object as a whole does
+   not acquire the runtime type of the object as a whole (``SubC``) until after
+   execution of the initializer list is complete.
+
+In contrast, by the time the body of ``C.C()`` executes, the dynamic type of
+``super`` has been set to ``C``.  It is therefore legal to invoke ``myfunc()``
+in that context, and ``C.myfunc()`` is the version of ``myfunc()`` that will be
+bound.
+
+In conclusion, the value of ``SubC.x`` is set by the actions of the base-class
+constructor the gets invoked, unless is it overridden explicitly (through
+assignment) in the body of the derived class constructor.  If the field ``x`` is
+to be overridden though initialization rather than though assignment, specific
+provision must be made in the constructor interface of the base class.  This is
+not a disadvantage, since the notion of encapsulation means that the base class
+has the final say on the ways in which ``x`` can be manipulated.
+
+Similar reasoning applies to the interpretation of ``const`` fields owned by a
+base class.  Either the base class will provide a constructor interface that
+allows such ``const`` fields to be manipulated, or a derived class has no
+control over them whatever, and must take them as they come.  Under this
+proposal, the issue becomes a matter of the tradeoff between safety and utility
+in the design of the base class -- not something that the language has to
+address directly.
+
+Example (Proposed) -- Record-Default Initialization Not Performed
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The present proposal resolves the problem where default-initialization is not
+performed in a consistent manner on fields whose initialization is unspecified.
+In the current implementation: one behavior is observed (field-default
+initialization is performed) when the compiler-supplied constructor is invoked;
+another behavior is observe (field-default initialization is not performed) when
+a user-defined constructor is supplied.
+
+Under the present proposal, field-default initialization would be applied
+uniformly.  In a user-defined constructor lacking field-initializer-clause (as
+in the example), the compiler would effectively re-write it as::
+
+   proc R.R(new_n: int)
+   init (n, A)
+   {
+     n = new_n;
+   }
+
+This actually has the same behavior as the existing implementation.  In
+contrast, the compiler-supplied default constructor is effectively implemented
+as::
+
+   proc R.R(new_n: int)
+   init (n = new_n, A)
+   { }
+
+There isn't an exact representation of the current behavior (at least, not one
+that is obvious to me), but the important part if this is that the field ``n``
+gets initialized first, so that when ``A`` is initialized, the dimensions of its
+domain can make use of ``n``.  
+
+Under this proposal, the programmer can obtain the the desired behavior by
+supplying an explicit initializer for field ``n`` in the
+field-initializer-clause.  Since fields that are not mentioned explcitly are
+initialized after those that are, this has the same effect as the above
+facsimile of the compiler-supplied version::
+
+   proc R.R(new_n: int)
+   init (n = new_n)
+   { }
+
 
 
 Description
@@ -272,6 +553,17 @@ observable effects within the program since it affects the number of times the
 copy-constructor (or its equivalent) is called.  The recommendation is to leave
 unspecified whether the copy-constructor is called in this case.
 
+Considering that a temporary object is not constructed and no copy is performed,
+the use of the keyword ``new`` in this context is somewhat misleading.  By
+making it optional (for variables of record type only), we allow the programmer
+to more closely express how initialization is actually performed.  Therefore,
+the syntax::
+
+   var r = R(<args>);
+
+would be interpreted as "initialize ``r`` using a call to a constructor of
+type ``R``, passing the given ``<args>``.
+
 
 .. _syntax:
 
@@ -322,13 +614,12 @@ The rest of the required syntax is supplied by productions that render the
      field-name = expression
      field-name
      variable-declaration
+     = expression
+     { expression }
 
    field-name:
      identifier
 
-   pseudo-field-name:
-     identifier
- 
    constructor-call-expression:
      call-expression
 
@@ -339,15 +630,33 @@ comma-separated and enclosed in parentheses.  Each field-name must name a
 ``super``.  
 
 If a ``variable-declaration`` appears in
-the ``field-initializer-list``, it creates a pseudo-field.  A pseudo-field can
+the ``field-initializer-list``, it creates a local variable.  A local variable can
 be useful for capturing intermediate results, e.g. to initialize two different
-fields to the same value -- the calculation of which is nontrivial.
+fields to the same value -- the calculation of which is nontrivial.  If the
+field-initializer does not contain a ``field-name`` and is not a
+``variable-declaration`` (the fourth and/or fifth form), then the given expression is
+evaluated for its side-effects.
 
-In the second form, the ``init`` keyword is followed by an ``=`` followed by a
+In the second form of ``field-initializer-clause``, the ``init`` keyword is followed by an ``=`` followed by a
 constructor call expression.  The name of constructor must match the name of the
 subject type.  The second form allows one constructor to invoke another.  It
 takes the place of a normal initializer list. [#]_
 
+Generic Binding and Instantiation
++++++++++++++++++++++++++++++++++
+
+The binding rules for a constructor and its arguments are the same as the
+binding rules for a non-constructor method.  If a field-initializer names a
+``param`` or ``type`` field in the constructor's type, then the initializer
+expression is evaluated and used in determining the concrete type of the object
+being constructed.  If a ``param`` or ``type`` field is named but no expression is provided in a
+``field-initializer`` (the second form), then the class- or record-default for
+that field is used, if provided.  Otherwise, it is a programming error.  (The
+generic field in question remains unbound, so the type of the object is
+indeterminate.)
+
+After all generic fields are bound, the constructor is instantiated.  The
+run-time semantics involve only the non-generic arguments and fields.  
 
 .. _semantics:
 
@@ -371,8 +680,12 @@ in the field declaration, if present.  Otherwise, it is initialized using the
 default value corresponding to its type.
 
 The keyword ``super`` refers to the base-class sub-object.  The ``super`` field
-behaves like any other field in the class. [#]_  A pseudo-field behaves like a normal
-variable declaration.  The variable introduced by a pseudo-field remains in
+behaves like any other field in the class. [#]_  The ``super`` field is
+considered to precede all of the fields added in the derived type.  
+
+A local variable behaves like a normal
+variable declaration.  The variable introduced by a local variable declaration
+in the field-initializer-clause remains in
 scope until the end of the constructor body.
 
 After all ``field-initializer`` expressions have
@@ -492,7 +805,7 @@ The basic change required in the implementation is to move the allocation
 outside of what is currently a constructor function (not a method) and then
 rework constructor functions to be methods instead.  
 
-This change should have no user-visible effect at the behavioral level.  At the
+This change should have no effect at the behavioral level.  At the
 meta-behavioral level (performance and resource usage), the difference should be
 observable as faster execution and a smaller run-time memory footprint.  Some of
 the implementation code should also be simpler.
@@ -530,8 +843,11 @@ The main syntactical and semantical provisions of this proposal are summarized a
   - Default values may be used explicitly by naming the field without
     supplying a value.  
 
-  - Pseudo-initializers may be used to capture results in an
+  - Local variables may be used to capture results in an
     initializer list.
+
+  - An expression that does not bind to a field or local variable is evaluated
+	for its side-effects.
 
   - A constructor call may be used place of a field initializer list.
 
@@ -588,6 +904,10 @@ The main syntactical and semantical provisions of this proposal are summarized a
 .. [#] The object itself (``this``) is not fully initialized until after the
        initializer list has been processed in its entirety.  Therefore, it is illegal
        for the keyword ``this`` to appear anywhere in a ``field-initializer-clause``.
+       In addition, implicit references to ``this`` (in the form of a method
+       call that is intended to bind to ``this``) are illegal in the context of
+       a field-initializer-clause.  (Implicit references to this are still
+       supported within the body of a constructor.)
 
 .. [#] In discussions, Vass expressed concerns about type-safety, given that any
        routine called from the initializer list or body of a constructor could
