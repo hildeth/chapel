@@ -48,7 +48,7 @@ Chapel (a separate effort) forces a distinction between initialization and
 assignment.  This new distinction causes the current implementation to be
 modified in such a way that fields are first default-initialzed and then
 overwritten (though assignment) with the final value the constructor intends
-them to have.  If this inefficiency is to be avoided, the syntax for
+them to have. [#]_  If this inefficiency is to be avoided, the syntax for
 constructors must be augmented to allow field-initializations to be specified
 explicitly.  Moreover, in some cases (for example if a field is declared to be
 ``const``) the behavior desired by the programmer cannot be obtained using the
@@ -69,7 +69,7 @@ observed behavior differs from expectations.  To be fair, the expectations being
 stated are part of the proposal, so agreeing with the proposal depends to a
 large extent upon accepting those premises.
 
-Example (Existing) -- Initialization by Assignment is Inefficient
+Example (Existing) -- Initialization by Assignment is Undesirable
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 An example of how a record constructor is currently written::
@@ -119,7 +119,25 @@ default field values with other values.
 
 If the fields are of fairly simple types, then this default-initialization followed by
 assignment is not so bad.  But when the types are complex or the assignment operator
-expensive, then it adversely affects performance.  
+expensive, then it adversely affects performance.  In addition, it may be
+different from what the programmer intends.
+
+For example, the semantics of initialization vs. assignment are very different
+for ``sync`` and ``single`` variables.  Consider a record with a field of
+``sync`` type.  By default, a single variable is initialized to ``(0, empty)``.
+In the current implementation, an attempt to initialize the value of a sync
+variable to anything other than its default value (using assignment) will also
+cause its full-empty bit to transition to ``full``.  Although calls to primitive
+functions could be used, the programmer does not have a convenient way to set
+the contained value of a sync variable field within a constructor.
+
+Arrays are another type whose initialization semantics are quite different from
+its assignment semantics.  Assignment entails an element-by-element copy.
+Therefore, default-initialization followed by assignment can be quite
+expensive.  If the programmer can specify how an array is to be initialized
+whild avoiding expensive assignment operations, array initialization in an
+application will become much cheaper (in terms of processor time).
+
 
 The current proposal adds a field-initializer-clause to the syntax for a
 constructor.  The field-initialization-clause allows field-initialization to be
@@ -866,6 +884,10 @@ The main syntactical and semantical provisions of this proposal are summarized a
 
 
 .. rubric:: Footnotes
+
+.. [#] This initialize-then-overwrite initialization is present in the existing
+	   implementation for some initialization cases; it is just that AMM makes
+	   it mandatory.
 
 .. [#] If the concepts of coercion and construction are fused (as in C++) then argument
        coercion needs to be disabled in the context of a constructor call.  Otherwise,
