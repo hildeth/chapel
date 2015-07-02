@@ -493,6 +493,14 @@ proc Block.dsiCreateReindexDist(newSpace, oldSpace) {
   return newDist;
 }
 
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: Block) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
+
 pragma "auto copy fn"
 proc chpl__autoCopy(x: Block) {
   if ! noRefCount then
@@ -607,6 +615,14 @@ proc Block.dsiCreateRankChangeDist(param newRank: int, args) {
   return new Block(newBbox, newTargetLocales,
                    dataParTasksPerLocale, dataParIgnoreRunningTasks,
                    dataParMinGranularity);
+}
+
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: BlockDom) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
 }
 
 pragma "auto copy fn"
@@ -822,6 +838,14 @@ proc BlockDom.dsiBuildRectangularDom(param rank: int, type idxType,
 // Added as a performance stopgap to avoid returning a domain
 //
 proc LocBlockDom.member(i) return myBlock.member(i);
+
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: BlockArr) {
+  if !noRefCount then
+    x.incRefCount();
+  return x;
+}
 
 pragma "auto copy fn"
 proc chpl__autoCopy(x: BlockArr) {

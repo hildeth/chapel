@@ -358,6 +358,18 @@ class BlockCyclicDom: BaseRectangularDom {
   var pid: int = -1; // privatized object id
 }
 
+// I'm not sure why resolution selects the catch-all initCopy for domains
+// [ChapelBase.chpl:1025] and not the domain-specific [ChapelArray:2514].
+// This is a workaround for privatized domain implementations to prevent the
+// ref count from going to zero prematurely, but it probably does not implement
+// the semantics we want.
+pragma "init copy fn"
+proc chpl__initCopy(x: BlockCyclicDom) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
+
 pragma "auto copy fn"
 proc chpl__autoCopy(x: BlockCyclicDom) {
   if ! noRefCount then
@@ -688,6 +700,14 @@ class BlockCyclicArr: BaseArr {
   var myLocArr: LocBlockCyclicArr(eltType, rank, idxType, stridable);
 
   var pid: int = -1; // privatized object id
+}
+
+// This is needed to support privatization.
+pragma "init copy fn"
+proc chpl__initCopy(x: BlockCyclicArr) {
+  if !noRefCount then
+    x.incRefCount();
+  return x;
 }
 
 pragma "auto copy fn"

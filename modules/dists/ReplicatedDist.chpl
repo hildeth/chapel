@@ -190,6 +190,14 @@ proc ReplicatedDist.dsiPrivatize(privatizeData: this.targetLocales.type)
   return new ReplicatedDist(privTargetLocales, "used during privatization");
 }
 
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: ReplicatedDist) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
+
 pragma "auto copy fn"
 proc chpl__autoCopy(x: ReplicatedDist) {
   if ! noRefCount then
@@ -250,6 +258,14 @@ class LocReplicatedDom {
   var domLocalRep: domain(rank, idxType, stridable);
 }
 
+
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: ReplicatedDom) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
 
 pragma "auto copy fn"
 proc chpl__autoCopy(x: ReplicatedDom) {
@@ -554,6 +570,14 @@ proc ReplicatedDom.dsiBuildArray(type eltType)
       locArr = new LocReplicatedArr(eltType, rank, idxType, stridable,
                                     locDom);
   return result;
+}
+
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: ReplicatedArr) {
+  if !noRefCount then
+    x.incRefCount();
+  return x;
 }
 
 pragma "auto copy fn"

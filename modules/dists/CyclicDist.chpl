@@ -348,6 +348,14 @@ class LocCyclic {
   }
 }
 
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: Cyclic) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
+
 pragma "auto copy fn"
 proc chpl__autoCopy(x: Cyclic) {
   if ! noRefCount then
@@ -378,6 +386,13 @@ class CyclicDom : BaseRectangularDom {
   var pid: int = -1;
 }
 
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: CyclicDom) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
 
 pragma "auto copy fn"
 proc chpl__autoCopy(x: CyclicDom) {
@@ -626,6 +641,14 @@ class CyclicArr: BaseArr {
   var myLocArr: LocCyclicArr(eltType=eltType, rank=rank, idxType=idxType, stridable=stridable);
   var pid: int = -1;
   const SENTINEL = max(rank*idxType);
+}
+
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: CyclicArr) {
+  if !noRefCount then
+    x.incRefCount();
+  return x;
 }
 
 pragma "auto copy fn"

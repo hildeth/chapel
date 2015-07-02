@@ -395,6 +395,14 @@ proc DimensionalDist2D.dsiIndexToLocale(indexx: indexT): locale {
                        di2.dsiIndexToLocale1d(indexx(2)):int);
 }
 
+// This is needed to support privatization:
+pragma "init copy fn"
+proc chpl__initCopy(x: DimensionalDist2D) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
+
 pragma "auto copy fn"
 proc chpl__autoCopy(x: DimensionalDist2D) {
   if ! noRefCount then
@@ -478,6 +486,13 @@ proc _passLocalLocIDsDom1d(dom1d, dist1d) {
 
 /// domain //////////////////////////////////////////////////////////////////
 
+
+pragma "init copy fn"
+proc chpl__initCopy(x: DimensionalDom) {
+  if ! noRefCount then
+    x.incRefCount();
+  return x;
+}
 
 pragma "auto copy fn"
 proc chpl__autoCopy(x: DimensionalDom) {
@@ -786,6 +801,13 @@ proc DimensionalDom.dsiBuildRectangularDom(param rank: int,
 
 /// array ///////////////////////////////////////////////////////////////////
 
+
+pragma "init copy fn"
+proc chpl__initCopy(x: DimensionalArr) {
+  if !noRefCount then
+    x.incRefCount();
+  return x;
+}
 
 pragma "auto copy fn"
 proc chpl__autoCopy(x: DimensionalArr) {
