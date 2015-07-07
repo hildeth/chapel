@@ -17,8 +17,12 @@
  * limitations under the License.
  */
 
-#include "passes.h"
 #include "resolveIntents.h"
+
+#include "passes.h"
+#include "astutil.h"
+#include "stlUtil.h"
+#include "expr.h"
 
 bool intentsResolved = false;
 
@@ -104,9 +108,75 @@ void resolveArgIntent(ArgSymbol* arg) {
     concreteIntent(arg->intent, arg->type);
 }
 
+static inline void insertDerefTmp(SymExpr* se)
+{
+  SET_LINENO(se);
+
+  ArgSymbol* arg = toArgSymbol(se->var);
+  VarSymbol* tmp = newTemp("deref_tmp", arg->type->getValType());
+  CallExpr* call = toCallExpr(se->parentExpr);
+  Expr* stmt = call->getStmtExpr();
+  stmt->insertBefore(new DefExpr(tmp));
+  stmt->insertBefore(new CallExpr(PRIM_MOVE, tmp,
+                                  new CallExpr(PRIM_DEREF, arg)));
+  se->var = tmp;
+}
+
+static void convertValArgToRefArg(ArgSymbol* arg)
+{
+  arg->type = arg->type->getRefType();
+
+  // Collect all the se's in the function.
+  std::vector<SymExpr*> symExprs;
+  collectSymExprs(arg->defPoint->parentSymbol, symExprs);
+  for_vector(SymExpr, se, symExprs)
+  {
+    if (se->var != arg)
+      continue;
+
+    if (CallExpr* call = toCallExpr(se->parentExpr))
+    {
+      if (call->isResolved())
+      {
+        ArgSymbol* formal = actual_to_formal(se);
+        if (! formal->type->symbol->hasFlag(FLAG_REF))
+          insertDerefTmp(se);
+      }
+      else
+      {
+        if (call->isPrimitive(PRIM_ADDR_OF))
+          call->replace(se);
+        else
+          insertDerefTmp(se);
+      }
+    }
+  }
+}
+
+// Replace the arg type with its ref type except for special cases.
+static void maybeUseRefType(ArgSymbol* arg)
+{
+  Type* t = arg->type;
+
+  // Right now, only do this for the string type.
+  // Eventually, we want to do this for all non-POD record types.
+  if (t != dtString)
+    return;
+
+  INT_ASSERT(arg->type != arg->type->getRefType());
+
+  convertValArgToRefArg(arg);
+}
+
 void resolveIntents() {
   forv_Vec(ArgSymbol, arg, gArgSymbols) {
+    IntentTag oldIntent = arg->intent;
     resolveArgIntent(arg);
+    if ((arg->intent ^ oldIntent) & INTENT_FLAG_REF)
+    {
+      // The ref flag changed.
+      maybeUseRefType(arg);
+    }
   }
   intentsResolved = true;
 }

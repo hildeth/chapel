@@ -449,7 +449,9 @@ static void widenClasses()
     //
     if (VarSymbol* var = toVarSymbol(def->sym))
       if (var->immediate)
-        continue;
+        // But do widen string literals
+        if (!isAggregateType(var->type))
+          continue;
 
     //
     // do not change the class field in a wide class type

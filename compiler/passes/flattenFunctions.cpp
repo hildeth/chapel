@@ -78,12 +78,16 @@ passableByVal(Type* type) {
       isClass(type)         ||
       type == dtTaskID      ||
       // For now, allow ranges as a special case, not records in general.
+      // This works because ranges are POD types.
       type->symbol->hasFlag(FLAG_RANGE) ||
       0)
     return true;
 
   // TODO: allow reasonably-sized records. NB this-in-taskfns-in-ctors.chpl
   // TODO: allow reasonably-sized tuples - heterogeneous and homogeneous.
+  // CAVEAT: Passing "interesting" records across locales by value where the
+  // declared intent is blank (equivalently "const ref") may defeat
+  // implementation code that depends on the locality of the referent.
 
   return false;
 }
@@ -197,6 +201,8 @@ addVarsToFormals(FnSymbol* fn, SymbolMap* vars) {
   }
 }
 
+
+// TODO: Can factor out a predicate to simplify this code.
 static void
 replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
   if (vars->n == 0) return;
@@ -207,21 +213,40 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
       ArgSymbol* arg = toArgSymbol(e->value);
       Type* type = arg->type;
       for_vector(SymExpr, se, symExprs) {
-          if (se->var == sym) {
-            if (type == sym->type) {
-              se->var = arg;
-            } else {
-              CallExpr* call = toCallExpr(se->parentExpr);
-              INT_ASSERT(call);
-              FnSymbol* fnc = call->isResolved();
+        if (se->var == sym) {
+          if (type == sym->type) {
+            se->var = arg;
+          } else {
+            CallExpr* call = toCallExpr(se->parentExpr);
+            INT_ASSERT(call);
+            if (call->isResolved())
+            {
+              // call invokes a function (not a primitive)
+              // See if we have to insert a dereference for this argument.
+              ArgSymbol* formal = actual_to_formal(se);
+              INT_ASSERT(arg->type->symbol->hasFlag(FLAG_REF));
+              if (! formal->type->symbol->hasFlag(FLAG_REF) &&
+                  ! (formal->intent & INTENT_FLAG_REF))
+              {
+                SET_LINENO(se);
+                VarSymbol* tmp = newTemp(sym->type);
+                se->getStmtExpr()->insertBefore(new DefExpr(tmp));
+                se->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, new CallExpr(PRIM_DEREF, arg)));
+                se->var = tmp;
+              }
+              else
+                se->var = arg;
+            }
+            else
+            {
               if ((call->isPrimitive(PRIM_MOVE) && call->get(1) == se) ||
                   (call->isPrimitive(PRIM_ASSIGN) && call->get(1) == se) ||
                   (call->isPrimitive(PRIM_SET_MEMBER) && call->get(1) == se) ||
                   (call->isPrimitive(PRIM_GET_MEMBER)) ||
                   (call->isPrimitive(PRIM_GET_MEMBER_VALUE)) ||
                   (call->isPrimitive(PRIM_WIDE_GET_LOCALE)) ||
-                  (call->isPrimitive(PRIM_WIDE_GET_NODE)) ||
-                  (fnc && arg->type == actual_to_formal(se)->type)) {
+                  (call->isPrimitive(PRIM_WIDE_GET_NODE)))
+              {
                 se->var = arg; // do not dereference argument in these cases
               } else if (call->isPrimitive(PRIM_ADDR_OF)) {
                 SET_LINENO(se);
@@ -235,6 +260,7 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
               }
             }
           }
+        }
       }
     }
   }

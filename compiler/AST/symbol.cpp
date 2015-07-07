@@ -551,12 +551,18 @@ GenRet VarSymbol::codegen() {
   GenInfo* info = gGenInfo;
   FILE* outfile = info->cfile;
   GenRet ret;
-  ret.chplType = typeInfo();
+  Type* t = typeInfo();
+  ret.chplType = t;
 
   if( outfile ) {
     // dtString immediates don't actually codegen as immediates, we just use
     // them for param string functionality.
-    if (immediate && ret.chplType != dtString) {
+    if (t->symbol->hasEitherFlag(FLAG_WIDE_REF, FLAG_WIDE_CLASS))
+      t = t->getField("addr")->type;
+    if (t->symbol->hasFlag(FLAG_HEAP))
+      t = t->getField("value")->type;
+
+    if (immediate && t != dtString) {
       ret.isLVPtr = GEN_VAL;
       if (immediate->const_kind == CONST_KIND_STRING) {
         ret.c += '"';
