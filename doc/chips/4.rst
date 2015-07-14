@@ -19,8 +19,16 @@ This Chapel Improvement Proposal records the last proposal for updated
 constructor syntax and semantics.  This is the proposal that was presented at a
 deep dive on 2014-12-09 with some changes based on feedback.
 
+Status
+------
+
+This is a working document, recording the latest consensus of the Constructor
+Subgroup.  Current contributors are: hilde, vass, mferguson, lydia
+
 Revision History
-----------------
+++++++++++++++++
+
+2015-06-23 Revision with comments from Vass and Michael.
 
 2015-06-09 First version as a ChIP.
 
@@ -881,6 +889,68 @@ The main syntactical and semantical provisions of this proposal are summarized a
   control is returned to the point of invocation of the constructor.
 
 * Direct invocation of a constructor (using method invocation syntax) should be illegal.
+
+
+.. _open_issues:
+
+Open Issues
++++++++++++
+
+The following design points remain open for further discussion and resolution:
+
+#. The idea of using keywords or well-known names to introduce constructors and
+   destructors is helpful in generic programming.  It also serves to simplify
+   scripts that are used to generate code automatically, since the constructor
+   and destructor names do not have to track the class/record name.
+
+   For reference, python uses well-known names for constructors (``__init__``),
+   destructors (``__destroy__``) and other functions known to its object
+   implementation.
+
+   Noting that we already distinguish between iterators and procedures using the
+   ``iter`` and ``proc`` keywords, it is in keeping with the current
+   implementation to consider keywords for the constructor and destructor.
+   However, if we go with the design of keeping separate the compiler entry
+   points supporting memory management from user entry points, then the large
+   number of names to be supported seems to favor using well-known names
+   instead.
+
+   Once the compiler entry points are documented, the implementation can be
+   modified to treat those names specially.  Pragmas such as "auto copy fn" can
+   be dropped from the user code, given that the parser can match those
+   well-known names and apply the needed pragmas (flags) internally.
+
+#. Should the MM interface used by the compiler be separate from the user
+   interface?  This would mean that the user could write zero-argument
+   constructors and constructors that can be called as copy constructors with
+   the expectation that they would only be called if invoked explicitly (using
+   ``new``).  The compiler-invoked equivalents would be the default initialization
+   method (currently called ``_defaultOf`` and implemented as a function) and
+   the copy-initialization method (currently called ``chpl__autoCopy`` and
+   implemented as a function).  
+
+   A type designer would be responsible for providing at least the
+   compiler-invoked versions.  Whether the user-invoked versions are supplied is
+   up to the type designer.  The compiler-invoked versions might be defined in
+   terms of the user-invoked versions or vice versa.  Under the "no magic"
+   principle, it is assumed that user code can invoke the compiler-invoked
+   versions explicitly using their well-known names.
+
+   For ease of programming, it is assumed that the compiler will supply default
+   versions of the compiler-invoked MM functions.  There is no need to supply
+   default versions of the user-invoked interfaces: whether they are provided is
+   up to the type designer.
+
+#. Should initialization of the base-class sub-object be treated like "just
+   another field" or something else?  The basic requirement is to provide the
+   author of a constructor control over how the fields in the base-class
+   sub-object are initialized.  This is especially important when considering
+   ``const`` fields in the base-class sub-object.
+
+   The discussion may include the concept of direct access to fields in the base
+   class by name, but should take into consideration the reality that access is
+   effectively only through accessor methods, and that in future versions access
+   control may be applied to these accessors.
 
 
 .. rubric:: Footnotes
