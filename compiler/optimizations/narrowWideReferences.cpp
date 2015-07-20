@@ -65,8 +65,13 @@
 static int narrowCount = 0, wideCount = 0;
 #endif
 
-static inline bool isWideType(Symbol* sym) {
-  return sym->type->symbol->hasEitherFlag(FLAG_WIDE_CLASS, FLAG_WIDE_REF);
+static inline bool isWideType(Type* type)
+{
+  return type->symbol->hasEitherFlag(FLAG_WIDE_CLASS, FLAG_WIDE_REF);
+}
+
+static inline bool hasWideType(Symbol* sym) {
+  return isWideType(sym->type);
 }
 
 static inline bool isRef(Symbol* sym) {
@@ -115,7 +120,7 @@ public:
 
   WideInfo() : sym(NULL), mustBeWide(false), wideType(NULL), valIsWide(false), fnToNarrow(NULL) { }
   WideInfo(Symbol* isym) : sym(isym), mustBeWide(false), valIsWide(false), fnToNarrow(NULL) {
-    if (isWideType(sym)) {
+    if (hasWideType(sym)) {
       wideType = toAggregateType(sym->type);
     } else
       wideType = NULL;
@@ -592,11 +597,11 @@ narrowSym(Symbol* sym, WideInfo* wi,
               }
             }
 
-            if (member && isWideType(member)) {
+            if (member && hasWideType(member)) {
               addNarrowDep(member, sym);
             }
 
-            if (isWideType(base->var)) {
+            if (hasWideType(base->var)) {
               addNarrowDep(base->var, sym);
             }
             continue;
@@ -617,7 +622,7 @@ narrowSym(Symbol* sym, WideInfo* wi,
           if (FnSymbol* fn = rhs->isResolved()) {
             if (fn->hasFlag(FLAG_LOCALE_MODEL_ALLOC))
               continue;
-            bool retIsWide = isWideType(fn->retType->symbol);
+            bool retIsWide = hasWideType(fn->retType->symbol);
 
             //
             // The LHS should follow the wideness of the returned type if:
@@ -643,7 +648,7 @@ narrowSym(Symbol* sym, WideInfo* wi,
         }
         if (SymExpr* rhs = toSymExpr(call->get(2))) {
             bool isObj = isWideObj || isClass(sym->type);
-            bool rhsIsWide = isWideType(rhs->var);
+            bool rhsIsWide = hasWideType(rhs->var);
             if (rhsIsWide) {
               // For 'class = x', the LHS has to be wide if the RHS is wide.
               if (isObj) {
@@ -783,7 +788,7 @@ narrowSym(Symbol* sym, WideInfo* wi,
               member = tuple->getField(1);
             }
           }
-          if (member && isWideType(member)) {
+          if (member && hasWideType(member)) {
             addNarrowDep(member, sym);
           }
         } else {
@@ -811,7 +816,7 @@ narrowSym(Symbol* sym, WideInfo* wi,
       if (call->isPrimitive(PRIM_RETURN)) {
         FnSymbol* fn = toFnSymbol(call->parentSymbol);
 
-        if (!isWideType(fn->retType->symbol))
+        if (! hasWideType(fn->retType->symbol))
           continue;
 
         wi->fnToNarrow = fn;
@@ -911,7 +916,7 @@ narrowArg(ArgSymbol* arg, WideInfo* wi,
     } else {
       SymExpr* actual = toSymExpr(formal_to_actual(call, arg));
       INT_ASSERT(actual);
-      if (isWideType(actual->var)) {
+      if (hasWideType(actual->var)) {
         DEBUG_PRINTF("\targdep %d->%d\n", actual->var->id, arg->id);
         // if the actual can be narrow, this arg could be narrow
         addNarrowDep(actual->var, arg);
@@ -1086,7 +1091,7 @@ static void resolveHelper(WideInfo* wi) {
     forv_Vec(Symbol, outSym, wi->outVec) {
       WideInfo* nwi = wideInfoMap->get(outSym);
       DEBUG_PRINTF("%s (%d)", nwi->sym->cname, nwi->sym->id);
-      if (!nwi->mustBeWide && isWideType(nwi->sym)) {
+      if (!nwi->mustBeWide && hasWideType(nwi->sym)) {
         DEBUG_PRINTF(" (%d)\n", wi->sym->id);
         nwi->mustBeWide = true;
         resolveHelper(nwi);
@@ -1203,7 +1208,7 @@ static void doNarrowing(SymExprTypeMap& widenMap)
       narrowCount++;
 #endif
       EFFECT_PRINTF("%d %s narrowed of from %s\n", wi->sym->id, wi->sym->cname, wi->sym->type->symbol->cname);
-      if (isWideType(wi->sym)) {
+      if (hasWideType(wi->sym)) {
         wi->sym->type = wi->sym->type->getField("addr")->type;
       }
       EFFECT_PRINTF("\t-> %s\n", wi->sym->type->symbol->cname);
@@ -1218,7 +1223,7 @@ static void doNarrowing(SymExprTypeMap& widenMap)
         }
       }
     } else {
-      if(!isWideType(wi->sym)) {
+      if(! hasWideType(wi->sym)) {
         if (!isTypeSymbol(wi->sym->defPoint->parentSymbol)) {
           DEBUG_PRINTF("incorrectly wide: %s(%d): %s\n",wi->sym->cname, wi->sym->id, wi->sym->type->symbol->cname);
         }
@@ -1238,6 +1243,7 @@ static void pruneWidenMap(SymExprTypeMap& widenMap)
   // to set the value to null in the widenMap. If the value is null,
   // a wide temporary will not be made for the actual.
   //
+#ifndef HILDE_MM
   form_Map(WideInfoMapElem, e, *wideInfoMap) {
     WideInfo* wi = e->value;
     if (!wi->mustBeWide) {
@@ -1252,6 +1258,27 @@ static void pruneWidenMap(SymExprTypeMap& widenMap)
       }
     }
   }
+#else
+  // If the actual is bound to a narrow formal, remove it from the map.
+  form_Map(SymExprTypeMapElem, e, widenMap)
+  {
+    SymExpr* key = e->key;
+    Type* value = e->value;
+    if (!value)
+      continue;
+
+    if (CallExpr* call = toCallExpr(key->parentExpr))
+    {
+      if (call->isResolved())
+      {
+        // A function call.
+        ArgSymbol* formal = actual_to_formal(key);
+        if (! hasWideType(formal))
+          widenMap.put(key, formal->type);
+      }        
+    }
+  }
+#endif
 
 
   //
@@ -1266,7 +1293,7 @@ static void pruneWidenMap(SymExprTypeMap& widenMap)
       if (CallExpr* call = toCallExpr(key->parentExpr)) {
         if (call->isPrimitive(PRIM_SET_MEMBER)) {
           SymExpr* member = toSymExpr(call->get(2));
-          if (!isWideType(member->var)) {
+          if (! hasWideType(member->var)) {
             widenMap.put(key, NULL);
           }
         }
@@ -1307,7 +1334,18 @@ static void insertWideReferenceTemps(SymExprTypeMap& widenMap)
   form_Map(SymExprTypeMapElem, e, widenMap) {
     SymExpr* key = e->key;
     Type* value = e->value;
-    if (value && key->var->type != value) { // can this be an assert?
+    if (!value)
+      // No conversion.
+      continue;
+
+    if (key->var->type == value)
+      // Types already match; nothing to do.
+      continue;
+
+    if (isWideType(value))
+    {
+      INT_ASSERT(value->getField("addr")->type == key->var->type);
+
       Expr* stmt = key->getStmtExpr();
       SET_LINENO(stmt);
       Symbol* tmp = newTemp(value);
@@ -1316,6 +1354,22 @@ static void insertWideReferenceTemps(SymExprTypeMap& widenMap)
       key->replace(new SymExpr(tmp));
       stmt->insertBefore(new CallExpr(PRIM_MOVE, tmp, key));
     }
+    else if (isRef(key->var))
+    {
+      // We need a deref temp.
+
+      INT_ASSERT(key->var->type->getField("_val")->type == value);
+      Expr* stmt = key->getStmtExpr();
+      SET_LINENO(stmt);
+      Symbol* tmp = newTemp(value);
+      DEBUG_PRINTF("Made deref temp %d for %d\n", tmp->id, key->var->id);
+      stmt->insertBefore(new DefExpr(tmp));
+      key->replace(new SymExpr(tmp));
+      stmt->insertBefore(new CallExpr(PRIM_MOVE, tmp,
+                                      new CallExpr(PRIM_DEREF, key)));
+    }
+    else
+      INT_FATAL(key, "Unhandled widenMap entry");
   }
 }
 
@@ -1444,7 +1498,7 @@ static void handleLocalFields(Map<Symbol*,Vec<SymExpr*>*>& defMap,
       SymExpr* base = toSymExpr(call->get(1));
       //SymExpr* member = toSymExpr(call->get(2));
 
-      if (isWideType(base->var)) {
+      if (hasWideType(base->var)) {
         // base.node == rhs.node
         insertNodeComparison(stmt, base->copy(), rhs->copy());
       } else {
