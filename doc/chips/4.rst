@@ -54,7 +54,7 @@ available in user-supplied constructors.
 Recent improvements in the automated memory management (AMM) implementation in
 Chapel (a separate effort) forces a distinction between initialization and
 assignment.  This new distinction causes the current implementation to be
-modified in such a way that fields are first default-initialzed and then
+modified in such a way that fields are first default-initialized and then
 overwritten (though assignment) with the final value the constructor intends
 them to have. [#]_  If this inefficiency is to be avoided, the syntax for
 constructors must be augmented to allow field-initializations to be specified
@@ -143,7 +143,7 @@ Arrays are another type whose initialization semantics are quite different from
 its assignment semantics.  Assignment entails an element-by-element copy.
 Therefore, default-initialization followed by assignment can be quite
 expensive.  If the programmer can specify how an array is to be initialized
-whild avoiding expensive assignment operations, array initialization in an
+while avoiding expensive assignment operations, array initialization in an
 application will become much cheaper (in terms of processor time).
 
 
@@ -156,7 +156,7 @@ default-initialized and then updated through assignment.
 Because initialization can and should be performed only once for each field,
 fields that are initialized explicitly in the field-initializer-clause need not
 be default-initialized.  The proposed syntax for field-initializers is
-sufficiently expressive that in most cases a subsequent update (througn
+sufficiently expressive that in most cases a subsequent update (through
 assignment) of the same field in the body of the constructor will not be
 necessary.  However, this is still supported if the coder chooses to express
 construction in that way.  This property also means that an implementation
@@ -293,7 +293,7 @@ wants to inherit the record-default initialization from the record declaration.
 The current proposal solves this problem by stating that record-default
 initialization is used unless the initialization of a field is explicitly
 overridden in the initializer list.  This will provide behavior that is more
-consisten with that of the current compiler-supplied all-fields constructor.
+consistent with that of the current compiler-supplied all-fields constructor.
 
 
 Examples -- Proposed Syntax and Semantics
@@ -332,25 +332,35 @@ indistinguishable for fundamental types.  If field ``r`` were of a record type
 whose assignment and copy operations differed, there would be an observable
 difference between the two.
 
-In the above (existing) example, the compiler would inserts call to
+In the above (existing) example, the compiler inserts a call to
 default-initialize ``r``, setting the value of ``r`` to the value returned by
 ``_defaultOf(r.type)``.  It then calls ``=(r, s)`` which invokes an assignment
 operator that can bind ``r`` as its left operand and ``s`` as its right operand.
 In contrast, the current example initializes ``r`` to the value of ``s`` by invoking
 (as a method) a constructor of ``r.type`` than can bind to ``s`` as its argument.
 
-Viewing the semantics of the constructor as a whole, space for ``t`` is allocated.
-The constructor is then invoked on ``t`` as a
-method.  It first executes the ``init`` clause.  This clause causes field ``t.r`` to be
-initialized using the value of ``s``.  After all explicit field initializations appearing
-in the ``init`` clause have been executed, the uninitialized fields in ``t`` are
-initialized in lexical order (according to the order in which they appear in the
-declaration of ``record R``).  The first such field is ``i``.  Since a field-default value
-of "10" is supplied, that value is used to initialize ``i``.  Since ``r`` has already been
-initialized, it is skipped.  Since there is no field-default value for ``b``, it is
-initialized using its type-default value "false".  Then, control is transferred to the
-body of the constructor, which in this case is empty.  Since ``t`` is initialized
-in-place, no bitwise copy is required after construction.
+Viewing the semantics of the constructor as a whole:
+
+* Space for ``t`` is allocated.
+* The constructor is then invoked on ``t`` as a method.  
+
+  * It first executes the ``init`` clause.  This clause causes field ``t.r`` to
+    be initialized using the value of ``s``.
+  * After all explicit field initializations appearing in the ``init`` clause
+    have been executed, the uninitialized fields in ``t`` are initialized in
+    lexical order (according to the order in which they appear in the
+    declaration of ``record R``).
+
+    * The first such field is ``i``.  Since a field-default value of "10" is
+      supplied, that value is used to initialize ``i``.
+    * Since ``r`` has already been initialized, it is skipped.
+    * Since there is no field-default value for ``b``, it is initialized using
+      its type-default value "false".
+
+  * Then, control is transferred to the body of the constructor, which in this case is empty.  
+
+* Since ``t`` is initialized in-place, no bitwise copy is required after construction.
+
 
 Example (Proposed) -- Special Interpretation of ``const`` Required
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -366,7 +376,7 @@ the end of the field-initializer-clause in a constructor.  This means that in
 the body of a constructor, fields declared to be ``const`` are immutable.
 Therefore, the treatment of ``const`` fields is the same in the body of a
 constructor as in the body of any other function.  Importantly, whether a field
-is treated as mutable in a function or method is consistent, irrespecitive of
+is treated as mutable in a function or method is consistent, irrespective of
 how it is called:  Namely, a ``const`` field is treated as immutable everywhere
 outside of a field-initializer-clause.
 
@@ -403,12 +413,12 @@ referenced explicitly or implicitly in the context of a field-initializer-clause
 Example (Proposed) -- Inconsistent Derived-Class Field Initialization
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-Under this proposal expected output of the above inheritance example is::
+Under this proposal, expected output of the above inheritance example is::
 
    {x = 1}
    {x = 1}
 
-The reason for this, is that the behavior of the compiler-supplied constructor
+The reason for this is that the behavior of the compiler-supplied constructor
 (called by _defaultOf()) for the derived class ``SubC`` is effectively::
 
    proc SubC.SubC()
@@ -444,12 +454,13 @@ in that context, and ``C.myfunc()`` is the version of ``myfunc()`` that will be
 bound.
 
 In conclusion, the value of ``SubC.x`` is set by the actions of the base-class
-constructor the gets invoked, unless is it overridden explicitly (through
+constructor that gets invoked, unless is it overridden explicitly (through
 assignment) in the body of the derived class constructor.  If the field ``x`` is
 to be overridden though initialization rather than though assignment, specific
-provision must be made in the constructor interface of the base class.  This is
-not a disadvantage, since the notion of encapsulation means that the base class
-has the final say on the ways in which ``x`` can be manipulated.
+provision must be made (by the base class author) in the constructor interface
+of the base class.  This is not a disadvantage, since the notion of
+encapsulation means that the base class has the final say on the ways in which
+``x`` can be manipulated.
 
 Similar reasoning applies to the interpretation of ``const`` fields owned by a
 base class.  Either the base class will provide a constructor interface that
@@ -466,10 +477,10 @@ The present proposal resolves the problem where default-initialization is not
 performed in a consistent manner on fields whose initialization is unspecified.
 In the current implementation: one behavior is observed (field-default
 initialization is performed) when the compiler-supplied constructor is invoked;
-another behavior is observe (field-default initialization is not performed) when
+another behavior is observed (field-default initialization is not performed) when
 a user-defined constructor is supplied.
 
-Under the present proposal, field-default initialization would be applied
+Under the present proposal, field-default initialization would be performed
 uniformly.  In a user-defined constructor lacking field-initializer-clause (as
 in the example), the compiler would effectively re-write it as::
 
@@ -480,7 +491,7 @@ in the example), the compiler would effectively re-write it as::
    }
 
 This actually has the same behavior as the existing implementation.  In
-contrast, the compiler-supplied default constructor is effectively implemented
+contrast, the compiler-supplied default constructor would be implemented
 as::
 
    proc R.R(new_n: int)
@@ -494,7 +505,7 @@ domain can make use of ``n``.
 
 Under this proposal, the programmer can obtain the the desired behavior by
 supplying an explicit initializer for field ``n`` in the
-field-initializer-clause.  Since fields that are not mentioned explcitly are
+field-initializer-clause.  Since fields that are not mentioned explicitly are
 initialized after those that are, this has the same effect as the above
 facsimile of the compiler-supplied version::
 
