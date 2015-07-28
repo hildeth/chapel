@@ -127,7 +127,7 @@ static void adjustRefLevel(ArgSymbol* arg)
       return;
 
     // Type arguments are always passed by "value".
-    if (t->symbol->hasFlag(FLAG_TYPE_VARIABLE))
+    if (arg->hasFlag(FLAG_TYPE_VARIABLE))
       return;
 
     // Do not do this for record-wrapped types, because somewhere else we
