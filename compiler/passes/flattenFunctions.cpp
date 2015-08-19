@@ -384,8 +384,4 @@ void flattenFunctions(void) {
   }
 
   flattenNestedFunctions(nestedFunctions);
-
-  // Insert dereference and reference temporaries as needed.
-  insertReferenceTemps();
-  insertDerefTemps();
 }

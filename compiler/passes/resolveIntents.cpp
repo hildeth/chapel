@@ -112,7 +112,7 @@ void resolveArgIntent(ArgSymbol* arg) {
 //
 // Application of this function to various arguments will temporarily violate
 // the invariant that the types of formal and actual arguments match.  The calls
-// to insertReferenceTemps() and insertDerefTemps() will correct that.
+// to insertReferenceTemps() and insertDerefTemps() in callDestructors will correct that.
 static void adjustRefLevel(ArgSymbol* arg)
 {
   if (arg->intent & INTENT_FLAG_REF)
@@ -148,7 +148,5 @@ void resolveIntents() {
     adjustRefLevel(arg);
   }
   replaceValArgsWithRefArgs();
-  insertReferenceTemps();
-  insertDerefTemps();
   intentsResolved = true;
 }

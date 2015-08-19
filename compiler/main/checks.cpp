@@ -165,7 +165,7 @@ void check_flattenFunctions()
   check_afterEveryPass();
   check_afterNormalization();
   check_afterResolution();
-  checkFormalActualTypesMatch();
+  checkFormalActualBaseTypesMatch();
   // Suggestion: Ensure no nested functions.
 }
 
@@ -174,7 +174,7 @@ void check_cullOverReferences()
   check_afterEveryPass();
   check_afterNormalization();
   check_afterResolution();
-  checkFormalActualTypesMatch();
+  checkFormalActualBaseTypesMatch();
 }
 
 void check_callDestructors()
@@ -442,7 +442,6 @@ static void check_afterCallDestructors()
 // Disabled for now because it does not hold when named externs are present.
 // See test/extern/hilde/namedExtern.chpl.
 //    checkNoUnresolveds();
-    checkFormalActualTypesMatch();
   }
 }
 
@@ -450,6 +449,7 @@ static void check_afterCallDestructors()
 static void check_afterLowerIterators()
 {
   checkLowerIteratorsRemovedPrims();
+  checkFormalActualTypesMatch();
 }
 
 
